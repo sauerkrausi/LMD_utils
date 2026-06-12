@@ -18,8 +18,8 @@ Post-processes the output folder from the online LMD converter.
 - `samples_and_wells_updated.json` — updated well mapping
 
 **Usage:**
-1. use CosciaLab QuPath to LMD online tool to convert geojson file into xml file 
-[Link:] (https://qupath-to-lmd-mdcberlin.streamlit.app/)
+1. use CosciaLab QuPath to LMD online tool to convert geojson file into xml file   
+Link: (https://qupath-to-lmd-mdcberlin.streamlit.app/)
 2. check that calibration points and QCs are all working. 
 3. make sure to select 96 well plate. No need to update the well map, since the python script will sort by the name of teh QuPath annotation.
 Confirm plate layout  >> process file >> download zipped filed
