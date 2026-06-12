@@ -6,7 +6,7 @@ import xml.etree.ElementTree as ET
 import re
 from pathlib import Path
 
-INPUT_PATH = "/Users/felix/Desktop/G34R_TMA2_ROIs_corrected.xml"
+INPUT_PATH = "or can do /path/to/xmlfile.xml"
 
 def capid_sort_key(cap_id):
     row = ord(cap_id[0].upper()) - ord('A')
