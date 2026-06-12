@@ -8,14 +8,14 @@ collection of scripts and code for working in spatial proteomics and laser micro
 Post-processes the output folder from the online LMD converter.
 
 **Input** (must be in the collection folder):
-- `*.xml` — shapes with CapID + XY coordinates
-- `samples_and_wells.json` — `{ "SampleName": "WellPosition" }`
+- `*.xml` - shapes with CapID + XY coordinates
+- `samples_and_wells.json` - `{ "SampleName": "WellPosition" }`
 
 **Output** (written to `lmd_outputs/`):
-- `*_sorted.xml` — shapes sorted by new well; `<TransferID>` added; `<CapID>` updated
-- `*_96wellplate.csv` — 96-well layout, samples assigned alphabetically
-- `*_sample_list.csv` — ROI number, sample name, well ID, comments, processed
-- `samples_and_wells_updated.json` — updated well mapping
+- `*_sorted.xml` - shapes sorted by new well; `<TransferID>` added; `<CapID>` updated
+- `*_96wellplate.csv` - 96-well layout, samples assigned alphabetically
+- `*_sample_list.csv` - ROI number, sample name, well ID, comments, processed
+- `samples_and_wells_updated.json` - updated well mapping
 
 **Usage:**
 1. use CosciaLab QuPath to LMD online tool to convert geojson file into xml file   
