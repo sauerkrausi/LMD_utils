@@ -32,7 +32,6 @@ OUTPUTS  (written to <collection_folder>/lmd_outputs/)
 
 USAGE
 -----
-  python process_lmd_collection.py <path/to/collection_folder>
   python process_lmd_collection.py          # uses COLLECTION_FOLDER below
 """
 
@@ -44,7 +43,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 # ---- CONFIG (used when no CLI arg is given) ----
-COLLECTION_FOLDER = Path("/Users/felix/Desktop/tmpLMD/VG/ID-0842 - 1875 A2_collection")
+# update here with the path to the unzipped folder from the CosciaLab QuPath to LMD online tool 
+COLLECTION_FOLDER = Path(".")
 OUTPUT_SUBDIR = "lmd_outputs"
 
 # ---- WELL LAYOUT ----
