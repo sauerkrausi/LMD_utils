@@ -43,6 +43,6 @@ Sorts an XML file by CapID in 96-well order (A1, A2, ..., H12) and renumbers sha
 
 > Note: `process_lmd_collection.py` supersedes this script for full workflows.
 
-
+---
 ### Links
 QuPath to XML github repo: https://github.com/CosciaLab/Qupath_to_LMD
