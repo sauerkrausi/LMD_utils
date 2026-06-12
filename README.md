@@ -25,12 +25,12 @@ Link: (https://qupath-to-lmd-mdcberlin.streamlit.app/)
 Confirm plate layout  >> process file >> download zipped filed
 4. Extract zipped folder and copy folder path.
 5. Add folder path into python file under COLLECTION_FOLDER
-6. Save and run python 'process_lmd_collection.py' script
+6. Save and run python `process_lmd_collection.py` script
 7. New subfolder called 'lmd_outputs' will be created containing
-- '*_96wellplate.csv':  96 well format with sample names, sorted in alphabetical order
-- '*_sample_list.csv:  csv file containing samples in well order (A1-H12) as well as their sample name (== TransferID)
-- '*_sorted.xml': well order sorted (A1-H12) xml file for import to LMD microscope
-- 'samples_and_wells_updated.json': json format of 96 well format
+- `*_96wellplate.csv`:  96 well format with sample names, sorted in alphabetical order
+- `*_sample_list.csv:  csv file containing samples in well order (A1-H12) as well as their sample name (== TransferID)
+- `*_sorted.xml`: well order sorted (A1-H12) xml file for import to LMD microscope
+- `samples_and_wells_updated.json`: json format of 96 well format
 
 
 
