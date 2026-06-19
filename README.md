@@ -29,7 +29,7 @@ Confirm plate layout  >> process file >> download zipped filed
 4. Extract zipped folder and copy folder path.
 5. Add folder path into python file under COLLECTION_FOLDER
 6. Save and run python `process_lmd_collection.py` script (locally) or use [online app](https://lmdutils-qfyodkmxyhworjpq24nanz.streamlit.app/)
-7. New subfolder called `lmd_outputs` will be created containing
+7. New subfolder called `lmd_outputs` will be created, containing:
 > - `*_96wellplate.csv`:  96 well format with sample names, sorted in alphabetical order
 > - `*_sample_list.csv:  csv file containing samples in well order (A1-H12) as well as their sample name (== TransferID)
 > - `*_sorted.xml`: well order sorted (A1-H12) xml file for import to LMD microscope
@@ -41,7 +41,7 @@ Confirm plate layout  >> process file >> download zipped filed
 ---
 
 ## sort_XML_ROI_by96well.py
-
+offline only
 Sorts an XML file by CapID in 96-well order (A1, A2, ..., H12) and renumbers shapes.
 
 **Input:** XML file with Shape_N elements containing CapID + XY coordinates  
