@@ -41,8 +41,8 @@ Confirm plate layout  >> process file >> download zipped filed
 ---
 
 ## sort_XML_ROI_by96well.py
-offline only  
-Sorts an XML file by CapID in 96-well order (A1, A2, ..., H12) and renumbers shapes.
+
+Sorts an XML file by CapID in 96-well order (A1, A2, ..., H12) and renumbers shapes (offline only).
 
 **Input:** XML file with Shape_N elements containing CapID + XY coordinates  
 **Output:** `*_sorted.xml` in the same directory
