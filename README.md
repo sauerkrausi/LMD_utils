@@ -9,7 +9,7 @@ Collection of scripts and code for working in spatial proteomics and laser micro
 
 Post-processes the output folder from the online Coscia Lab QuPath to XML converter.
 
-**Input** (must be in the collection folder):
+**Input** (must be in the collection zip folder):
 - `*.xml` - shapes with CapID + XY coordinates
 - `samples_and_wells.json` - `{ "SampleName": "WellPosition" }`
 
