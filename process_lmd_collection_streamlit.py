@@ -225,7 +225,8 @@ st.markdown(
     unsafe_allow_html=True
 )
 st.title("LMD Collection Processor")
-st.markdown("Upload the **`.zip`** exported from the online LMD converter. "
+st.markdown("Upload the **`.zip`** exported from the online "
+            "[Coscia Lab QuPath to XML converter](https://github.com/CosciaLab/Qupath_to_LMD). "
             "The app sorts ROIs alphabetically, assigns new well positions, "
             "and generates all output files for download.")
 
