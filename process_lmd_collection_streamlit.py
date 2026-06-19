@@ -1,11 +1,20 @@
 """
 process_lmd_collection_streamlit.py
 ====================================
-Streamlit UI for process_lmd_collection.py
+Streamlit UI for the LMD collection processor.
 
-Upload the .zip from the online LMD converter → get sorted XML + CSVs + plate maps.
+OVERVIEW
+--------
+1. User uploads .zip from the Coscia Lab QuPath-to-LMD online converter
+2. App extracts XML + samples_and_wells.json from the zip (in memory)
+3. Core processing:
+   - Sorts samples alphabetically, assigns new well positions A1..H12
+   - Updates CapID in XML, injects TransferID (sample name) before CapID
+   - Generates 96-well plate CSV, sample list CSV, updated JSON
+4. Results cached in session_state so download buttons don't trigger reprocessing
+5. Individual file downloads + "Download all" zip
 
-Deploy: streamlit run process_lmd_collection_streamlit.py
+Deploy:  streamlit run process_lmd_collection_streamlit.py
 """
 
 import io
@@ -14,6 +23,7 @@ import csv
 import re
 import zipfile
 import xml.etree.ElementTree as ET
+
 import streamlit as st
 import matplotlib
 matplotlib.use("Agg")
@@ -22,13 +32,30 @@ import matplotlib.patches as mpatches
 import matplotlib.cm as cm
 
 # ============================================================
-# WELL LAYOUT
+# PAGE CONFIG
 # ============================================================
-ROWS   = list("ABCDEFGH")
-COLS   = list(range(1, 13))
-WELLS_96 = [f"{r}{c}" for r in ROWS for c in COLS]
+st.set_page_config(page_title="LMD Collection Processor", layout="wide")
 
+# Fixed footer with GitHub link
+st.markdown(
+    "<div style='position:fixed;bottom:10px;right:16px;font-size:12px;color:#888;'>"
+    "Questions / issues: <a href='https://github.com/sauerkrausi/LMD_utils' target='_blank'>"
+    "github.com/sauerkrausi/LMD_utils</a></div>",
+    unsafe_allow_html=True
+)
+
+# ============================================================
+# WELL LAYOUT CONSTANTS
+# ============================================================
+ROWS     = list("ABCDEFGH")
+COLS     = list(range(1, 13))
+WELLS_96 = [f"{r}{c}" for r in ROWS for c in COLS]  # A1, A2, ..., H12
+
+# ============================================================
+# HELPERS
+# ============================================================
 def well_sort_key(well_str):
+    """Convert well ID (e.g. 'B3') to a sortable (row, col) tuple."""
     well_str = well_str.strip()
     if not well_str or len(well_str) < 2:
         return (99, 99)
@@ -38,6 +65,7 @@ def well_sort_key(well_str):
         return (99, 99)
 
 def indent_xml(elem, level=0):
+    """Recursively add pretty-print indentation to an XML element tree."""
     pad = "\n" + "  " * level
     if len(elem):
         if not elem.text or not elem.text.strip():
@@ -55,21 +83,28 @@ def indent_xml(elem, level=0):
         elem.tail = "\n"
 
 # ============================================================
-# CORE PROCESSING (in-memory)
+# CORE PROCESSING  (all in-memory, no disk I/O)
 # ============================================================
 def process_collection_data(xml_bytes: bytes, json_bytes: bytes, stem: str) -> dict:
     """
-    Returns dict with keys:
-      sorted_xml, wellplate_csv, sample_list_csv, updated_json (all bytes)
-      grid (dict for plate visualization)
-      n_rois (int)
-      warnings (list of str)
+    Takes raw file bytes, returns a dict of output bytes + metadata.
+
+    Steps:
+      1. Parse JSON mapping (sample -> original well)
+      2. Build alphabetical well assignments (sample -> new well A1..H12)
+      3. Parse XML, sort shapes by new well, update CapID, inject TransferID
+      4. Serialise sorted XML to bytes
+      5. Build 96-well plate CSV
+      6. Build sample list CSV (one row per ROI in XML order)
+      7. Build updated JSON with new well assignments
     """
     warnings = []
 
-    sample_to_orig_well = json.loads(json_bytes.decode('utf-8'))
-    orig_well_to_sample = {v: k for k, v in sample_to_orig_well.items()}
+    # 1. Load sample -> original well mapping and invert it
+    sample_to_orig_well  = json.loads(json_bytes.decode('utf-8'))
+    orig_well_to_sample  = {v: k for k, v in sample_to_orig_well.items()}
 
+    # 2. Alphabetical well assignment
     all_samples_alpha = sorted(sample_to_orig_well.keys(), key=str.casefold)
     if len(all_samples_alpha) > 96:
         warnings.append(f"{len(all_samples_alpha)} samples exceed 96-well capacity; extras omitted.")
@@ -80,7 +115,7 @@ def process_collection_data(xml_bytes: bytes, json_bytes: bytes, stem: str) -> d
         if i < 96
     }
 
-    # Parse XML
+    # 3. Parse XML and sort shapes
     tree = ET.parse(io.StringIO(xml_bytes.decode('utf-8-sig')))
     root = tree.getroot()
 
@@ -91,11 +126,12 @@ def process_collection_data(xml_bytes: bytes, json_bytes: bytes, stem: str) -> d
     def shape_new_well_key(el):
         orig_cap = el.find('CapID').text.strip()
         sample   = orig_well_to_sample.get(orig_cap, "")
-        new_well = sample_to_new_well.get(sample, "Z99")
+        new_well = sample_to_new_well.get(sample, "Z99")  # unmapped shapes sort last
         return well_sort_key(new_well)
 
     shapes_sorted = sorted(shapes, key=shape_new_well_key)
 
+    # Rebuild XML root: header elements first, then renumbered shapes
     for el in list(root):
         root.remove(el)
     for el in non_shapes:
@@ -106,14 +142,16 @@ def process_collection_data(xml_bytes: bytes, json_bytes: bytes, stem: str) -> d
         sc.text = str(len(shapes_sorted))
 
     for new_idx, el in enumerate(shapes_sorted, start=1):
-        el.tag = f"Shape_{new_idx}"
-        orig_cap    = el.find('CapID').text.strip()
-        sample_name = orig_well_to_sample.get(orig_cap, "")
-        new_well    = sample_to_new_well.get(sample_name, "")
+        el.tag       = f"Shape_{new_idx}"
+        orig_cap     = el.find('CapID').text.strip()
+        sample_name  = orig_well_to_sample.get(orig_cap, "")
+        new_well     = sample_to_new_well.get(sample_name, "")
 
+        # Overwrite CapID with new well position
         cap_el      = el.find('CapID')
         cap_el.text = new_well
 
+        # Insert <TransferID> immediately before <CapID>
         children    = list(el)
         cap_pos     = children.index(cap_el)
         transfer_el = ET.Element('TransferID')
@@ -121,12 +159,12 @@ def process_collection_data(xml_bytes: bytes, json_bytes: bytes, stem: str) -> d
         el.insert(cap_pos, transfer_el)
         root.append(el)
 
+    # 4. Serialise sorted XML
     indent_xml(root)
     xml_buf = io.BytesIO()
     tree.write(xml_buf, encoding='UTF-8', xml_declaration=True)
-    sorted_xml_bytes = xml_buf.getvalue()
 
-    # 96-well plate CSV
+    # 5. 96-well plate CSV
     grid = {r: {c: "" for c in COLS} for r in ROWS}
     for sample, well in sample_to_new_well.items():
         grid[well[0]][int(well[1:])] = sample
@@ -137,43 +175,46 @@ def process_collection_data(xml_bytes: bytes, json_bytes: bytes, stem: str) -> d
     for r in ROWS:
         w.writerow([r] + [grid[r][c] for c in COLS])
 
-    # Sample list CSV
+    # 6. Sample list CSV (ROI order matches XML shape order)
     sample_list_buf = io.StringIO()
     w = csv.writer(sample_list_buf)
     w.writerow(["ROI_number", "TransferID / Sample Name", "well_ID", "comments", "processed"])
     for roi_num, el in enumerate(shapes_sorted, start=1):
-        sample  = el.find('TransferID').text or ""
+        sample   = el.find('TransferID').text or ""
         new_well = el.find('CapID').text or ""
         w.writerow([roi_num, sample, new_well, "", ""])
 
-    # Updated JSON
+    # 7. Updated JSON
     updated_json_str = json.dumps(sample_to_new_well, indent=4, ensure_ascii=False)
 
     return {
-        "sorted_xml":       sorted_xml_bytes,
-        "wellplate_csv":    wellplate_buf.getvalue().encode('utf-8'),
-        "sample_list_csv":  sample_list_buf.getvalue().encode('utf-8'),
-        "updated_json":     updated_json_str.encode('utf-8'),
-        "grid":             grid,
-        "sample_to_new_well": sample_to_new_well,
-        "n_rois":           len(shapes_sorted),
-        "n_samples":        len(all_samples_alpha),
-        "warnings":         warnings,
+        "sorted_xml":         xml_buf.getvalue(),
+        "wellplate_csv":      wellplate_buf.getvalue().encode('utf-8'),
+        "sample_list_csv":    sample_list_buf.getvalue().encode('utf-8'),
+        "updated_json":       updated_json_str.encode('utf-8'),
+        "grid":               grid,
+        "n_rois":             len(shapes_sorted),
+        "n_samples":          len(all_samples_alpha),
+        "warnings":           warnings,
+        "stem":               stem,
     }
 
 # ============================================================
 # PLATE VISUALIZATION
 # ============================================================
 def plot_plate_png(grid, title) -> bytes:
-    """Render 96-well plate colored by sample group prefix. Returns PNG bytes."""
-    # Extract group label (everything before last underscore segment for coloring)
+    """
+    Renders a 96-well plate as a PNG.
+    Wells are colored by sample group (first token before '_').
+    Returns PNG as bytes.
+    """
     all_labels = sorted({grid[r][c] for r in ROWS for c in COLS if grid[r][c]})
-    # Color by unique prefix (first token before first underscore) for visual grouping
+
     def group_of(label):
         return label.split("_")[0] if label else ""
 
-    groups = sorted({group_of(l) for l in all_labels if l})
-    palette = cm.tab20
+    groups      = sorted({group_of(l) for l in all_labels if l})
+    palette     = cm.tab20
     group_color = {g: palette(i / max(len(groups), 1)) for i, g in enumerate(groups)}
 
     fig, ax = plt.subplots(figsize=(14, 7))
@@ -192,15 +233,16 @@ def plot_plate_png(grid, title) -> bytes:
             edge  = "#999999" if not label else "#333333"
             ax.add_patch(plt.Circle((x, y), 0.42, color=color, ec=edge, lw=0.7, zorder=2))
             if label:
-                short = label.replace("_", "\n")
-                ax.text(x, y, short, ha="center", va="center",
+                ax.text(x, y, label.replace("_", "\n"), ha="center", va="center",
                         fontsize=4, zorder=3, color="black")
 
+    # Row (A-H) and column (1-12) axis labels
     for r_idx, r in enumerate(ROWS):
         ax.text(-0.65, 7 - r_idx, r, ha="right", va="center", fontsize=9, fontweight="bold")
     for c_idx, c in enumerate(COLS):
         ax.text(c_idx, 8.0, str(c), ha="center", va="bottom", fontsize=9, fontweight="bold")
 
+    # Legend: one entry per sample group
     patches = [mpatches.Patch(color=group_color[g], label=g) for g in groups]
     if patches:
         ax.legend(handles=patches, bbox_to_anchor=(1.01, 1), loc="upper left",
@@ -212,35 +254,56 @@ def plot_plate_png(grid, title) -> bytes:
     plt.close(fig)
     return buf.getvalue()
 
+def build_download_zip(results: dict, png_bytes: bytes) -> bytes:
+    """Bundle all output files into a single zip for 'Download all'."""
+    stem = results["stem"]
+    buf  = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(f"{stem}_sorted.xml",              results["sorted_xml"])
+        z.writestr(f"{stem}_96wellplate.csv",         results["wellplate_csv"])
+        z.writestr(f"{stem}_sample_list.csv",         results["sample_list_csv"])
+        z.writestr("samples_and_wells_updated.json",  results["updated_json"])
+        z.writestr(f"{stem}_platemap.png",            png_bytes)
+    return buf.getvalue()
+
 # ============================================================
 # STREAMLIT UI
 # ============================================================
-st.set_page_config(page_title="LMD Collection Processor", layout="wide")
-
-# Footer
-st.markdown(
-    "<div style='position:fixed;bottom:10px;right:16px;font-size:12px;color:#888;'>"
-    "Questions / issues: <a href='https://github.com/sauerkrausi/LMD_utils' target='_blank'>"
-    "github.com/sauerkrausi/LMD_utils</a></div>",
-    unsafe_allow_html=True
-)
 st.title("LMD Collection Processor")
-st.markdown("Upload the **`.zip`** exported from the online "
-            "[Coscia Lab QuPath to XML converter](https://github.com/CosciaLab/Qupath_to_LMD). "
-            "The app sorts ROIs alphabetically, assigns new well positions, "
-            "and generates all output files for download.")
+st.markdown(
+    "Upload the **`.zip`** exported from the online "
+    "[Coscia Lab QuPath to XML converter](https://github.com/CosciaLab/Qupath_to_LMD). "
+    "The app sorts ROIs alphabetically, assigns new well positions, "
+    "and generates all output files for download."
+)
 
+# File uploader
 uploaded = st.file_uploader("Upload collection .zip", type=["zip"])
 
+# Initialise session state for caching results across reruns
+if "results" not in st.session_state:
+    st.session_state.results  = None
+    st.session_state.png      = None
+    st.session_state.zip_all  = None
+    st.session_state.last_file = None
+
+# Reset cached results if a new file is uploaded
+if uploaded and uploaded.name != st.session_state.last_file:
+    st.session_state.results   = None
+    st.session_state.png       = None
+    st.session_state.zip_all   = None
+    st.session_state.last_file = uploaded.name
+
 if uploaded:
+    # Validate zip contents
     with zipfile.ZipFile(uploaded) as z:
-        names     = z.namelist()
-        xml_names = [n for n in names if n.endswith(".xml") and "_sorted" not in n
-                     and not n.startswith("__MACOSX")]
+        names      = z.namelist()
+        xml_names  = [n for n in names if n.endswith(".xml")
+                      and "_sorted" not in n and not n.startswith("__MACOSX")]
         json_names = [n for n in names if n.endswith("samples_and_wells.json")]
 
     if not xml_names:
-        st.error("No XML file found in the zip (expected one *.xml file).")
+        st.error("No XML file found in the zip.")
         st.stop()
     if not json_names:
         st.error("samples_and_wells.json not found in the zip.")
@@ -254,36 +317,59 @@ if uploaded:
     col1.success(f"XML: `{xml_name.split('/')[-1]}`")
     col2.success(f"JSON: `{json_name.split('/')[-1]}`")
 
+    # Process button — only runs if results not already cached
     if st.button("Process", type="primary"):
         with st.spinner("Processing..."):
             with zipfile.ZipFile(uploaded) as z:
                 xml_bytes  = z.read(xml_name)
                 json_bytes = z.read(json_name)
 
-            results = process_collection_data(xml_bytes, json_bytes, stem)
+            results  = process_collection_data(xml_bytes, json_bytes, stem)
+            png      = plot_plate_png(results["grid"], f"{stem} — well assignment")
+            zip_all  = build_download_zip(results, png)
 
-        for w in results["warnings"]:
-            st.warning(w)
+            # Cache everything in session state
+            st.session_state.results  = results
+            st.session_state.png      = png
+            st.session_state.zip_all  = zip_all
 
-        st.success(f"Done — {results['n_rois']} ROIs / {results['n_samples']} samples")
+# Show results if available (persists across download-button reruns)
+if st.session_state.results:
+    results = st.session_state.results
+    stem    = results["stem"]
 
-        # Plate visualization
-        st.subheader("96-well plate layout")
-        png_bytes = plot_plate_png(results["grid"], f"{stem} — alphabetical well assignment")
-        st.image(png_bytes, use_container_width=True)
+    for w in results["warnings"]:
+        st.warning(w)
 
-        # Downloads
-        st.subheader("Downloads")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.download_button("Sorted XML",        results["sorted_xml"],
-                           file_name=f"{stem}_sorted.xml",       mime="application/xml")
-        c2.download_button("96-well plate CSV", results["wellplate_csv"],
-                           file_name=f"{stem}_96wellplate.csv",  mime="text/csv")
-        c3.download_button("Sample list CSV",   results["sample_list_csv"],
-                           file_name=f"{stem}_sample_list.csv",  mime="text/csv")
-        c4.download_button("Updated JSON",      results["updated_json"],
-                           file_name="samples_and_wells_updated.json", mime="application/json")
+    st.success(f"Done — {results['n_rois']} ROIs / {results['n_samples']} samples")
 
-        c5, _ = st.columns([1, 3])
-        c5.download_button("Plate map PNG",     png_bytes,
-                           file_name=f"{stem}_platemap.png",     mime="image/png")
+    # Plate visualization
+    st.subheader("96-well plate layout")
+    st.image(st.session_state.png, use_container_width=True)
+
+    # Downloads
+    st.subheader("Downloads")
+
+    # "Download all" zip — prominent, at top
+    st.download_button(
+        "⬇ Download all (zip)",
+        st.session_state.zip_all,
+        file_name=f"{stem}_lmd_outputs.zip",
+        mime="application/zip",
+        type="primary",
+    )
+
+    st.markdown("---")
+
+    # Individual file downloads
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.download_button("Sorted XML",        results["sorted_xml"],
+                       file_name=f"{stem}_sorted.xml",      mime="application/xml")
+    c2.download_button("96-well plate CSV", results["wellplate_csv"],
+                       file_name=f"{stem}_96wellplate.csv", mime="text/csv")
+    c3.download_button("Sample list CSV",   results["sample_list_csv"],
+                       file_name=f"{stem}_sample_list.csv", mime="text/csv")
+    c4.download_button("Updated JSON",      results["updated_json"],
+                       file_name="samples_and_wells_updated.json", mime="application/json")
+    c5.download_button("Plate map PNG",     st.session_state.png,
+                       file_name=f"{stem}_platemap.png",    mime="image/png")
