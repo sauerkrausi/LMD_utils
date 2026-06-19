@@ -7,7 +7,7 @@ Collection of scripts and code for working in spatial proteomics and laser micro
 
 ## process_lmd_collection.py
 
-Post-processes the output folder from the online LMD converter.
+Post-processes the output folder from the online Coscia Lab QuPath to XML converter.
 
 **Input** (must be in the collection folder):
 - `*.xml` - shapes with CapID + XY coordinates
@@ -52,4 +52,4 @@ Sorts an XML file by CapID in 96-well order (A1, A2, ..., H12) and renumbers sha
 
 ---
 ### Links
-QuPath to XML github repo: https://github.com/CosciaLab/Qupath_to_LMD
+Coscia Lab QuPath to XML github repo: https://github.com/CosciaLab/Qupath_to_LMD
