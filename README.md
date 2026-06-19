@@ -1,4 +1,4 @@
-# spatial_misc
+# LMD_utils
 collection of scripts and code for working in spatial proteomics and laser micro-dissection microscopy (LMD) workflows
 
 ---
