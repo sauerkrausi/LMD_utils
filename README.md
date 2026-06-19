@@ -1,6 +1,8 @@
 # LMD_utils
 collection of scripts and code for working in spatial proteomics and laser micro-dissection microscopy (LMD) workflows
 
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://lmdutils-qfyodkmxyhworjpq24nanz.streamlit.app/)
+
 ---
 
 ## process_lmd_collection.py
