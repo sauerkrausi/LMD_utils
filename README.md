@@ -13,11 +13,12 @@ Post-processes the output folder from the online Coscia Lab QuPath to XML conver
 - `*.xml` - shapes with CapID + XY coordinates
 - `samples_and_wells.json` - `{ "SampleName": "WellPosition" }`
 
-**Output** (written to `lmd_outputs/`):
+**Output** (written to `lmd_outputs/` or available for download when using online app):
 - `*_sorted.xml` - shapes sorted by new well; `<TransferID>` added; `<CapID>` updated
 - `*_96wellplate.csv` - 96-well layout, samples assigned alphabetically
 - `*_sample_list.csv` - ROI number, sample name, well ID, comments, processed
 - `samples_and_wells_updated.json` - updated well mapping
+- `platemap.png` - color coded plate map 
 
 **Usage:**
 1. use CosciaLab QuPath to LMD online tool to convert geojson file into xml file   
