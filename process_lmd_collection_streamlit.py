@@ -105,14 +105,26 @@ def process_collection_data(xml_bytes: bytes, json_bytes: bytes, stem: str) -> d
     orig_well_to_sample  = {v: k for k, v in sample_to_orig_well.items()}
 
     # 2. Alphabetical well assignment
+    # Respect custom start position from JSON (e.g. E1 instead of A1)
     all_samples_alpha = sorted(sample_to_orig_well.keys(), key=str.casefold)
-    if len(all_samples_alpha) > 96:
-        warnings.append(f"{len(all_samples_alpha)} samples exceed 96-well capacity; extras omitted.")
+
+    existing_wells = sorted(sample_to_orig_well.values(), key=well_sort_key)
+    start_well     = existing_wells[0] if existing_wells else "A1"
+    start_idx      = WELLS_96.index(start_well) if start_well in WELLS_96 else 0
+
+    if start_idx > 0:
+        warnings.append(f"Custom start position detected: wells assigned from {start_well} "
+                        f"(as defined in samples_and_wells.json).")
+
+    available = 96 - start_idx
+    if len(all_samples_alpha) > available:
+        warnings.append(f"{len(all_samples_alpha)} samples exceed available wells "
+                        f"from {start_well} ({available} slots); extras omitted.")
 
     sample_to_new_well = {
-        sample: WELLS_96[i]
+        sample: WELLS_96[start_idx + i]
         for i, sample in enumerate(all_samples_alpha)
-        if i < 96
+        if start_idx + i < 96
     }
 
     # 3. Parse XML and sort shapes
