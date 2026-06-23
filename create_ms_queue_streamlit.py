@@ -393,63 +393,55 @@ for key in ("results", "zip_bytes", "last_file"):
         st.session_state[key] = None
 
 # ============================================================
-# SIDEBAR — RUN PARAMETERS
+# MAIN UI — inputs at top
 # ============================================================
-with st.sidebar:
-    st.header("Run parameters")
+st.title("MS Queue Generator")
 
-    date     = datetime.date.today().strftime("%Y%m%d")
-    initials = st.text_input("Initials", value="FK")
+date = datetime.date.today().strftime("%Y%m%d")
 
-    # LC method
-    lc_sel  = st.selectbox("LC method (LC_SHORT)", LC_OPTIONS)
-    lc_short = st.text_input("Custom LC_SHORT", value="") if lc_sel == "Custom" else lc_sel
+# Row 1: Initials | LC_SHORT | MS_SHORT
+c1, c2, c3 = st.columns([1, 2, 2])
+initials = c1.text_input("Initials", value="FK")
 
-    # MS method
-    ms_sel   = st.selectbox("MS method (MS_SHORT)", MS_OPTIONS)
-    ms_short = st.text_input("Custom MS_SHORT", value="") if ms_sel == "Custom" else ms_sel
+lc_sel   = c2.selectbox("LC method (LC_SHORT)", LC_OPTIONS)
+lc_short = c2.text_input("Custom LC_SHORT", value="") if lc_sel == "Custom" else lc_sel
 
-    st.divider()
-    sample_load = st.text_input("Sample load", value="1ng")
+ms_sel   = c3.selectbox("MS method (MS_SHORT)", MS_OPTIONS)
+ms_short = c3.text_input("Custom MS_SHORT", value="") if ms_sel == "Custom" else ms_sel
 
-    use_k562 = st.checkbox("Include K562", value=True)
-    k562_load = st.text_input("K562 load", value="1ng") if use_k562 else ""
+# Row 2: loads + controls
+c4, c5, c6, c7, c8 = st.columns([1, 1, 1, 1, 1])
+sample_load  = c4.text_input("Sample load", value="1ng")
+use_k562     = c5.checkbox("Include K562", value=True)
+k562_load    = c6.text_input("K562 load",    value="1ng")  if use_k562    else ""
+use_supermix = c7.checkbox("Include Supermix", value=True)
+supermix_load = c8.text_input("Supermix load", value="20ng") if use_supermix else ""
 
-    use_supermix  = st.checkbox("Include Supermix", value=True)
-    supermix_load = st.text_input("Supermix load", value="20ng") if use_supermix else ""
+st.divider()
 
-    st.divider()
-    sep_method  = st.text_area("Separation Method", height=80,
+# Method paths — collapsible
+with st.expander("Instrument method paths", expanded=False):
+    sep_method  = st.text_area("Separation Method", height=60,
         value=r"D:\Methods\LC_Methods\Evosep\WhisperZOOM_40_SPD_32p5min.m?HyStar_LC")
     inj_method  = st.text_input("Injection Method", value="Standard")
-    ms_method   = st.text_area("MS Method", height=80,
+    ms_method   = st.text_area("MS Method", height=60,
         value=(r"D:\Methods\MS_Methods\DIA\Farah\TimsControl methods"
                r"\DIA_PASEF_Var_windows_test4_pydiAID_300to1200_80PASEF_scans_-05shift"
                r".proteoscape.m?OtofImpacTEMControl"))
-    proc_method = st.text_area("Processing Method", height=80,
+    proc_method = st.text_area("Processing Method", height=60,
         value=(r"D:\Methods\MS_Methods\DIA\Farah\TimsControl methods"
                r"\DIA_PASEF_Var_windows_test4_pydiAID_300to1200_80PASEF_scans_-05shift"
                r".proteoscape.m?DataAnalysis"))
 
-# ============================================================
-# DERIVED PATHS
-# ============================================================
-_year  = date[:4]
+# Data paths — editable, pre-filled from date + initials
+_year      = date[:4]
 _month_str = datetime.datetime.strptime(date, "%Y%m%d").strftime("%m %B")
-sample_path = rf"D:\Data\{_year}\{_month_str}\Sample\{initials}"
-blank_path  = rf"D:\Data\{_year}\{_month_str}\Blank"
-
-# ============================================================
-# MAIN UI
-# ============================================================
-st.title("MS Queue Generator")
-st.markdown("Upload the sample list CSV, verify the data paths, then click **Generate**.")
-
-# Data path preview
-with st.expander("Data paths (verify before generating)", expanded=True):
-    col1, col2 = st.columns(2)
-    col1.markdown(f"**Sample / K562 / Supermix**\n\n`{sample_path}`")
-    col2.markdown(f"**Blank**\n\n`{blank_path}`")
+with st.expander("Data paths (verify and edit if needed)", expanded=True):
+    cp1, cp2 = st.columns(2)
+    sample_path = cp1.text_input("Sample / K562 / Supermix path",
+                                 value=rf"D:\Data\{_year}\{_month_str}\Sample\{initials}")
+    blank_path  = cp2.text_input("Blank path",
+                                 value=rf"D:\Data\{_year}\{_month_str}\Blank")
 
 # File upload
 uploaded = st.file_uploader("Upload sample list CSV", type=["csv"])
@@ -476,6 +468,29 @@ if uploaded:
             res = build_queue_core(uploaded.getvalue(), params)
             st.session_state.results   = res
             st.session_state.zip_bytes = build_zip(res)
+
+# ============================================================
+# SIDEBAR — settings summary (read-only)
+# ============================================================
+with st.sidebar:
+    st.header("Current settings")
+    st.markdown(f"**Date:** {date}")
+    st.markdown(f"**Initials:** {initials}")
+    st.markdown(f"**LC:** {lc_short or '—'}")
+    st.markdown(f"**MS:** {ms_short or '—'}")
+    st.divider()
+    st.markdown(f"**Sample load:** {sample_load}")
+    if use_k562:
+        st.markdown(f"**K562 load:** {k562_load}")
+    else:
+        st.markdown("**K562:** off")
+    if use_supermix:
+        st.markdown(f"**Supermix load:** {supermix_load}")
+    else:
+        st.markdown("**Supermix:** off")
+    st.divider()
+    st.markdown(f"**Sample path:**\n\n`{sample_path}`")
+    st.markdown(f"**Blank path:**\n\n`{blank_path}`")
 
 # ============================================================
 # RESULTS
