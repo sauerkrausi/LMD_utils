@@ -190,11 +190,11 @@ def process_collection_data(xml_bytes: bytes, json_bytes: bytes, stem: str) -> d
     # 6. Sample list CSV (ROI order matches XML shape order)
     sample_list_buf = io.StringIO()
     w = csv.writer(sample_list_buf)
-    w.writerow(["ROI_number", "TransferID / Sample Name", "well_ID", "comments", "processed"])
+    w.writerow(["cut order", "ROI", "Well_ID", "Dropout {Y/N}", "comments", "processed"])
     for roi_num, el in enumerate(shapes_sorted, start=1):
         sample   = el.find('TransferID').text or ""
         new_well = el.find('CapID').text or ""
-        w.writerow([roi_num, sample, new_well, "", ""])
+        w.writerow([roi_num, sample, new_well, "", "", ""])
 
     # 7. Updated JSON
     updated_json_str = json.dumps(sample_to_new_well, indent=4, ensure_ascii=False)
@@ -358,7 +358,7 @@ if True:
         st.download_button(
             "⬇ Download corrected GeoJSON",
             r["bytes"],
-            file_name=f"{r['stem']}_corrected.geojson",
+            file_name=f"{r['stem']}_reclassified.geojson",
             mime="application/geo+json",
             type="primary",
         )
