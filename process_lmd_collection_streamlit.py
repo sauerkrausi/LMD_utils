@@ -312,9 +312,9 @@ def reclassify_geojson(geojson_bytes: bytes) -> tuple:
 st.title("LMD Utils")
 
 # ============================================================
-# SECTION 1 — Re-classify GeoJSON
+# SECTION 1 — Re-classify / Re-name GeoJSON
 # ============================================================
-st.header("1. Re-classify GeoJSON")
+st.header("1. Re-classify / Re-name GeoJSON")
 if True:
     st.markdown(
         "Upload a QuPath GeoJSON export. The app copies **`properties.name`** into "
