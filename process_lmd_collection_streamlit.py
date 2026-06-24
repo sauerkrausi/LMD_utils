@@ -318,7 +318,7 @@ st.header("1. Re-classify GeoJSON")
 if True:
     st.markdown(
         "Upload a QuPath GeoJSON export. The app copies **`properties.name`** into "
-        "**`properties.classification.name`** for each ROI: required by the "
+        "**`properties.classification.name`** for each ROI. Re-classification of annotation-names to classes of the same name isrequired for the "
         "[Coscia Lab QuPath to XML converter](https://qupath-to-lmd-mdcberlin.streamlit.app/)."
     )
 
@@ -365,7 +365,7 @@ if True:
 
         st.info("Next step: upload the corrected GeoJSON to the "
                 "[Coscia Lab converter](https://qupath-to-lmd-mdcberlin.streamlit.app/), "
-                "then bring the downloaded zip to Tab 2.")
+                "then bring the downloaded zip to Step 2.")
 
 st.divider()
 
