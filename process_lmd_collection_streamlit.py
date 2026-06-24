@@ -311,12 +311,11 @@ def reclassify_geojson(geojson_bytes: bytes) -> tuple:
 # ============================================================
 st.title("LMD Utils")
 
-tab1, tab2 = st.tabs(["1. Re-classify GeoJSON", "2. Process LMD Collection"])
-
 # ============================================================
-# TAB 1 — Re-classify GeoJSON
+# SECTION 1 — Re-classify GeoJSON
 # ============================================================
-with tab1:
+st.header("1. Re-classify GeoJSON")
+if True:
     st.markdown(
         "Upload a QuPath GeoJSON export. The app copies **`properties.name`** into "
         "**`properties.classification.name`** for each ROI — required by the "
@@ -368,10 +367,13 @@ with tab1:
                 "[Coscia Lab converter](https://qupath-to-lmd-mdcberlin.streamlit.app/), "
                 "then bring the downloaded zip to Tab 2.")
 
+st.divider()
+
 # ============================================================
-# TAB 2 — Process LMD Collection
+# SECTION 2 — Process LMD Collection
 # ============================================================
-with tab2:
+st.header("2. Process LMD Collection")
+if True:
     st.markdown(
         "Upload the **`.zip`** exported from the "
         "[Coscia Lab QuPath to XML converter](https://qupath-to-lmd-mdcberlin.streamlit.app/). "
