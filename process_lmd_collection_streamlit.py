@@ -1,18 +1,17 @@
 """
 process_lmd_collection_streamlit.py
 ====================================
-Streamlit UI for the LMD collection processor.
+Two-tab Streamlit app for the LMD workflow.
 
-OVERVIEW
---------
-1. User uploads .zip from the Coscia Lab QuPath-to-LMD online converter
-2. App extracts XML + samples_and_wells.json from the zip (in memory)
-3. Core processing:
-   - Sorts samples alphabetically, assigns new well positions A1..H12
-   - Updates CapID in XML, injects TransferID (sample name) before CapID
-   - Generates 96-well plate CSV, sample list CSV, updated JSON
-4. Results cached in session_state so download buttons don't trigger reprocessing
-5. Individual file downloads + "Download all" zip
+TAB 1 — Re-classify GeoJSON
+  Upload a QuPath GeoJSON export, copy properties.name into
+  properties.classification.name for each feature, download corrected
+  GeoJSON for use with the Coscia Lab online converter.
+
+TAB 2 — Process LMD Collection
+  Upload the .zip from the Coscia Lab QuPath-to-LMD online converter.
+  Sorts ROIs alphabetically, assigns new well positions A1..H12,
+  updates CapID, injects TransferID, outputs all files for download.
 
 Deploy:  streamlit run process_lmd_collection_streamlit.py
 """
@@ -23,6 +22,7 @@ import csv
 import re
 import zipfile
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 import streamlit as st
 import matplotlib
@@ -279,109 +279,186 @@ def build_download_zip(results: dict, png_bytes: bytes) -> bytes:
     return buf.getvalue()
 
 # ============================================================
+# GEOJSON RE-CLASSIFIER
+# ============================================================
+def reclassify_geojson(geojson_bytes: bytes) -> tuple:
+    """
+    For each feature: copy properties.name -> properties.classification.name.
+    Returns (corrected_bytes, n_fixed, name_list, rejected_list).
+    """
+    geojson  = json.loads(geojson_bytes.decode('utf-8'))
+    n_fixed  = 0
+    names    = []
+    rejected = []
+
+    for feature in geojson.get("features", []):
+        props = feature.get("properties", {})
+        name  = props.get("name", "").strip()
+        if not name:
+            rejected.append("(unnamed feature)")
+            continue
+        classification = props.setdefault("classification", {})
+        if classification.get("name") != name:
+            classification["name"] = name
+            n_fixed += 1
+        names.append(name)
+
+    corrected = json.dumps(geojson, indent=2).encode('utf-8')
+    return corrected, n_fixed, names, rejected
+
+# ============================================================
 # STREAMLIT UI
 # ============================================================
-st.title("LMD Collection Processor")
-st.markdown(
-    "Upload the **`.zip`** exported from the online "
-    "[Coscia Lab QuPath to XML converter](https://github.com/CosciaLab/Qupath_to_LMD). "
-    "The app sorts ROIs alphabetically, assigns new well positions, "
-    "and generates all output files for download."
-)
+st.title("LMD Utils")
 
-# File uploader
-uploaded = st.file_uploader("Upload collection .zip", type=["zip"])
+tab1, tab2 = st.tabs(["1. Re-classify GeoJSON", "2. Process LMD Collection"])
 
-# Initialise session state for caching results across reruns
-if "results" not in st.session_state:
-    st.session_state.results  = None
-    st.session_state.png      = None
-    st.session_state.zip_all  = None
-    st.session_state.last_file = None
-
-# Reset cached results if a new file is uploaded
-if uploaded and uploaded.name != st.session_state.last_file:
-    st.session_state.results   = None
-    st.session_state.png       = None
-    st.session_state.zip_all   = None
-    st.session_state.last_file = uploaded.name
-
-if uploaded:
-    # Validate zip contents
-    with zipfile.ZipFile(uploaded) as z:
-        names      = z.namelist()
-        xml_names  = [n for n in names if n.endswith(".xml")
-                      and "_sorted" not in n and not n.startswith("__MACOSX")]
-        json_names = [n for n in names if n.endswith("samples_and_wells.json")]
-
-    if not xml_names:
-        st.error("No XML file found in the zip.")
-        st.stop()
-    if not json_names:
-        st.error("samples_and_wells.json not found in the zip.")
-        st.stop()
-
-    xml_name  = xml_names[0]
-    json_name = json_names[0]
-    stem      = xml_name.split("/")[-1].replace(".xml", "")
-
-    col1, col2 = st.columns(2)
-    col1.success(f"XML: `{xml_name.split('/')[-1]}`")
-    col2.success(f"JSON: `{json_name.split('/')[-1]}`")
-
-    # Process button — only runs if results not already cached
-    if st.button("Process", type="primary"):
-        with st.spinner("Processing..."):
-            with zipfile.ZipFile(uploaded) as z:
-                xml_bytes  = z.read(xml_name)
-                json_bytes = z.read(json_name)
-
-            results  = process_collection_data(xml_bytes, json_bytes, stem)
-            png      = plot_plate_png(results["grid"], f"{stem} — well assignment")
-            zip_all  = build_download_zip(results, png)
-
-            # Cache everything in session state
-            st.session_state.results  = results
-            st.session_state.png      = png
-            st.session_state.zip_all  = zip_all
-
-# Show results if available (persists across download-button reruns)
-if st.session_state.results:
-    results = st.session_state.results
-    stem    = results["stem"]
-
-    for w in results["warnings"]:
-        st.warning(w)
-
-    st.success(f"Done — {results['n_rois']} ROIs / {results['n_samples']} samples")
-
-    # Plate visualization
-    st.subheader("96-well plate layout")
-    st.image(st.session_state.png, use_container_width=True)
-
-    # Downloads
-    st.subheader("Downloads")
-
-    # "Download all" zip — prominent, at top
-    st.download_button(
-        "⬇ Download all (zip)",
-        st.session_state.zip_all,
-        file_name=f"{stem}_lmd_outputs.zip",
-        mime="application/zip",
-        type="primary",
+# ============================================================
+# TAB 1 — Re-classify GeoJSON
+# ============================================================
+with tab1:
+    st.markdown(
+        "Upload a QuPath GeoJSON export. The app copies **`properties.name`** into "
+        "**`properties.classification.name`** for each ROI — required by the "
+        "[Coscia Lab QuPath to XML converter](https://qupath-to-lmd-mdcberlin.streamlit.app/)."
     )
 
-    st.markdown("---")
+    geo_uploaded = st.file_uploader("Upload GeoJSON", type=["geojson", "json"], key="geo_up")
 
-    # Individual file downloads
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.download_button("Sorted XML",        results["sorted_xml"],
-                       file_name=f"{stem}_sorted.xml",      mime="application/xml")
-    c2.download_button("96-well plate CSV", results["wellplate_csv"],
-                       file_name=f"{stem}_96wellplate.csv", mime="text/csv")
-    c3.download_button("Sample list CSV",   results["sample_list_csv"],
-                       file_name=f"{stem}_sample_list.csv", mime="text/csv")
-    c4.download_button("Updated JSON",      results["updated_json"],
-                       file_name="samples_and_wells_updated.json", mime="application/json")
-    c5.download_button("Plate map PNG",     st.session_state.png,
-                       file_name=f"{stem}_platemap.png",    mime="image/png")
+    # Session state for tab 1
+    for k in ("geo_result", "geo_last"):
+        if k not in st.session_state:
+            st.session_state[k] = None
+
+    if geo_uploaded and geo_uploaded.name != st.session_state.geo_last:
+        st.session_state.geo_result = None
+        st.session_state.geo_last   = geo_uploaded.name
+
+    if geo_uploaded:
+        if st.button("Re-classify", type="primary", key="geo_btn"):
+            with st.spinner("Processing..."):
+                corrected, n_fixed, names, rejected = reclassify_geojson(geo_uploaded.getvalue())
+                st.session_state.geo_result = {
+                    "bytes":    corrected,
+                    "n_fixed":  n_fixed,
+                    "names":    names,
+                    "rejected": rejected,
+                    "stem":     Path(geo_uploaded.name).stem,
+                }
+
+    if st.session_state.geo_result:
+        r = st.session_state.geo_result
+        st.success(f"Done — {len(r['names'])} ROIs, {r['n_fixed']} classification(s) updated.")
+
+        if r["rejected"]:
+            st.warning(f"{len(r['rejected'])} feature(s) skipped (no name): {r['rejected']}")
+
+        with st.expander(f"ROI names ({len(r['names'])})", expanded=False):
+            st.write(sorted(r["names"]))
+
+        st.download_button(
+            "⬇ Download corrected GeoJSON",
+            r["bytes"],
+            file_name=f"{r['stem']}_corrected.geojson",
+            mime="application/geo+json",
+            type="primary",
+        )
+
+        st.info("Next step: upload the corrected GeoJSON to the "
+                "[Coscia Lab converter](https://qupath-to-lmd-mdcberlin.streamlit.app/), "
+                "then bring the downloaded zip to Tab 2.")
+
+# ============================================================
+# TAB 2 — Process LMD Collection
+# ============================================================
+with tab2:
+    st.markdown(
+        "Upload the **`.zip`** exported from the "
+        "[Coscia Lab QuPath to XML converter](https://qupath-to-lmd-mdcberlin.streamlit.app/). "
+        "The app sorts ROIs alphabetically, assigns new well positions, "
+        "and generates all output files for download."
+    )
+
+    uploaded = st.file_uploader("Upload collection .zip", type=["zip"], key="lmd_up")
+
+    # Session state for tab 2
+    for k in ("results", "png", "zip_all", "last_file"):
+        if k not in st.session_state:
+            st.session_state[k] = None
+
+    if uploaded and uploaded.name != st.session_state.last_file:
+        st.session_state.results   = None
+        st.session_state.png       = None
+        st.session_state.zip_all   = None
+        st.session_state.last_file = uploaded.name
+
+    if uploaded:
+        with zipfile.ZipFile(uploaded) as z:
+            names      = z.namelist()
+            xml_names  = [n for n in names if n.endswith(".xml")
+                          and "_sorted" not in n and not n.startswith("__MACOSX")]
+            json_names = [n for n in names if n.endswith("samples_and_wells.json")]
+
+        if not xml_names:
+            st.error("No XML file found in the zip.")
+            st.stop()
+        if not json_names:
+            st.error("samples_and_wells.json not found in the zip.")
+            st.stop()
+
+        xml_name  = xml_names[0]
+        json_name = json_names[0]
+        stem      = xml_name.split("/")[-1].replace(".xml", "")
+
+        col1, col2 = st.columns(2)
+        col1.success(f"XML: `{xml_name.split('/')[-1]}`")
+        col2.success(f"JSON: `{json_name.split('/')[-1]}`")
+
+        if st.button("Process", type="primary", key="lmd_btn"):
+            with st.spinner("Processing..."):
+                with zipfile.ZipFile(uploaded) as z:
+                    xml_bytes  = z.read(xml_name)
+                    json_bytes = z.read(json_name)
+
+                results  = process_collection_data(xml_bytes, json_bytes, stem)
+                png      = plot_plate_png(results["grid"], f"{stem} — well assignment")
+                zip_all  = build_download_zip(results, png)
+
+                st.session_state.results  = results
+                st.session_state.png      = png
+                st.session_state.zip_all  = zip_all
+
+    if st.session_state.results:
+        results = st.session_state.results
+        stem    = results["stem"]
+
+        for w in results["warnings"]:
+            st.warning(w)
+
+        st.success(f"Done — {results['n_rois']} ROIs / {results['n_samples']} samples")
+
+        st.subheader("96-well plate layout")
+        st.image(st.session_state.png, use_container_width=True)
+
+        st.subheader("Downloads")
+        st.download_button(
+            "⬇ Download all (zip)",
+            st.session_state.zip_all,
+            file_name=f"{stem}_lmd_outputs.zip",
+            mime="application/zip",
+            type="primary",
+        )
+
+        st.markdown("---")
+
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.download_button("Sorted XML",        results["sorted_xml"],
+                           file_name=f"{stem}_sorted.xml",      mime="application/xml")
+        c2.download_button("96-well plate CSV", results["wellplate_csv"],
+                           file_name=f"{stem}_96wellplate.csv", mime="text/csv")
+        c3.download_button("Sample list CSV",   results["sample_list_csv"],
+                           file_name=f"{stem}_sample_list.csv", mime="text/csv")
+        c4.download_button("Updated JSON",      results["updated_json"],
+                           file_name="samples_and_wells_updated.json", mime="application/json")
+        c5.download_button("Plate map PNG",     st.session_state.png,
+                           file_name=f"{stem}_platemap.png",    mime="image/png")
