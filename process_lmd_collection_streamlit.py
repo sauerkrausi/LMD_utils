@@ -3,7 +3,7 @@ process_lmd_collection_streamlit.py
 ====================================
 Two-tab Streamlit app for the LMD workflow.
 
-TAB 1 — Re-classify GeoJSON
+TAB 1 — Re-classify / rename GeoJSON
   Upload a QuPath GeoJSON export, copy properties.name into
   properties.classification.name for each feature, download corrected
   GeoJSON for use with the Coscia Lab online converter.
