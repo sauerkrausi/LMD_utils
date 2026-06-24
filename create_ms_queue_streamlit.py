@@ -53,9 +53,38 @@ QUEUE_COLS = [
     "Sample Type", "Volume [µl]", "Data Path", "Run Automated Processing",
 ]
 
-LC_OPTIONS    = ["WhisperZOOM40", "WhisperZOOM20", "WhisperZOOM100",
-                 "30SPD", "60SPD", "100SPD", "Custom"]
-MS_OPTIONS    = ["diaPASEF", "ddaPASEF", "Custom"]
+# ============================================================
+# METHOD LOOKUP — ADD YOUR LC AND MS METHODS HERE
+# ============================================================
+# LC_METHODS: short name (used in sample IDs) -> full Separation Method path
+#   Add a new entry for each LC gradient / column you use.
+#   The short name appears in the dropdown and in output filenames.
+LC_METHODS = {
+    "WhisperZOOM40": r"D:\Methods\LC_Methods\Evosep\WhisperZOOM_40_SPD_32p5min.m?HyStar_LC",
+    # "WhisperZOOM20": r"D:\Methods\LC_Methods\Evosep\WhisperZOOM_20_SPD_...",
+    # "30SPD":         r"D:\Methods\LC_Methods\Evosep\30SPD_...",
+}
+
+# MS_METHODS: short name -> (MS Method path, Processing Method path)
+#   Add a new entry for each acquisition method you use.
+MS_METHODS = {
+    "diaPASEF": (
+        r"D:\Methods\MS_Methods\DIA\Farah\TimsControl methods"
+        r"\DIA_PASEF_Var_windows_test4_pydiAID_300to1200_80PASEF_scans_-05shift"
+        r".proteoscape.m?OtofImpacTEMControl",
+        r"D:\Methods\MS_Methods\DIA\Farah\TimsControl methods"
+        r"\DIA_PASEF_Var_windows_test4_pydiAID_300to1200_80PASEF_scans_-05shift"
+        r".proteoscape.m?DataAnalysis",
+    ),
+    # "ddaPASEF": (
+    #     r"D:\Methods\MS_Methods\DDA\...",
+    #     r"D:\Methods\MS_Methods\DDA\...",
+    # ),
+}
+
+# Dropdown options are built from the dicts above — no need to edit these lines
+LC_OPTIONS = list(LC_METHODS.keys()) + ["Custom"]
+MS_OPTIONS = list(MS_METHODS.keys()) + ["Custom"]
 
 # ============================================================
 # HELPERS
@@ -192,9 +221,18 @@ def build_queue_core(csv_bytes: bytes, p: dict) -> dict:
                      if r.get("Dropout {Y/N}", "").strip().upper() == "Y"}
     samples = [r for r in all_rows if r.get("Dropout {Y/N}", "").strip().upper() != "Y"]
 
+    # Extract core from ROI name: prefix_sampleInt_roiInt -> prefix
+    def core_from_roi(name):
+        parts = name.split("_")
+        try:
+            int(parts[-1]); int(parts[-2])
+            return "_".join(parts[:-2]) or name
+        except (ValueError, IndexError):
+            return name
+
     cores_seen, core_map = [], {}
     for row in samples:
-        core = row["Core"].strip()
+        core = core_from_roi(row["ROI"].strip())
         if core not in core_map:
             core_map[core] = []
             cores_seen.append(core)
@@ -296,8 +334,9 @@ def build_queue_core(csv_bytes: bytes, p: dict) -> dict:
     for row in all_rows:
         w_id = row["Well_ID"].strip()
         if w_id:
-            slot1_grid[w_id[0]][int(w_id[1:])] = row["ROI"].strip()
-            well_to_core[row["ROI"].strip()] = row["Core"].strip()
+            roi = row["ROI"].strip()
+            slot1_grid[w_id[0]][int(w_id[1:])] = roi
+            well_to_core[roi] = core_from_roi(roi)
 
     slot1_buf = io.StringIO()
     w = csv.writer(slot1_buf)
@@ -419,19 +458,16 @@ supermix_load = c8.text_input("Supermix load", value="20ng") if use_supermix els
 
 st.divider()
 
-# Method paths — collapsible
+# Method paths — auto-filled from lookup dicts, editable if needed
 with st.expander("Instrument method paths", expanded=False):
-    sep_method  = st.text_area("Separation Method", height=60,
-        value=r"D:\Methods\LC_Methods\Evosep\WhisperZOOM_40_SPD_32p5min.m?HyStar_LC")
+    # Pre-fill from LC_METHODS / MS_METHODS; blank if "Custom" or not found
+    default_sep  = LC_METHODS.get(lc_short, "")
+    default_ms, default_proc = MS_METHODS.get(ms_short, ("", ""))
+
+    sep_method  = st.text_area("Separation Method", height=60, value=default_sep)
     inj_method  = st.text_input("Injection Method", value="Standard")
-    ms_method   = st.text_area("MS Method", height=60,
-        value=(r"D:\Methods\MS_Methods\DIA\Farah\TimsControl methods"
-               r"\DIA_PASEF_Var_windows_test4_pydiAID_300to1200_80PASEF_scans_-05shift"
-               r".proteoscape.m?OtofImpacTEMControl"))
-    proc_method = st.text_area("Processing Method", height=60,
-        value=(r"D:\Methods\MS_Methods\DIA\Farah\TimsControl methods"
-               r"\DIA_PASEF_Var_windows_test4_pydiAID_300to1200_80PASEF_scans_-05shift"
-               r".proteoscape.m?DataAnalysis"))
+    ms_method   = st.text_area("MS Method",         height=60, value=default_ms)
+    proc_method = st.text_area("Processing Method", height=60, value=default_proc)
 
 # Data paths — editable, pre-filled from date + initials
 _year      = date[:4]
