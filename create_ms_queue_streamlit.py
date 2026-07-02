@@ -210,6 +210,7 @@ def build_queue_core(csv_bytes: bytes, p: dict) -> dict:
     sample_path  = p["sample_path"]
     blank_path   = p["blank_path"]
     stem         = p["stem"]
+    one_slot     = p.get("one_slot", False)
 
     # Read CSV
     text = csv_bytes.decode("utf-8-sig")
@@ -247,9 +248,24 @@ def build_queue_core(csv_bytes: bytes, p: dict) -> dict:
     supermix_spares = max(3, math.ceil(supermix_needed * 0.10)) if use_supermix else 0
     blank_spares    = max(3, math.ceil(blank_needed    * 0.10))
 
-    k562_offset     = 0
-    supermix_offset = 24
-    blank_offset    = 48
+    if one_slot:
+        # Controls packed at bottom rows (H=Blank, G=Supermix if used, F=K562 if both used)
+        ctrl_types = []
+        if use_k562:     ctrl_types.append("K562")
+        if use_supermix: ctrl_types.append("Supermix")
+        ctrl_types.append("Blank")
+        ctrl_offsets = {}
+        for i, ct in enumerate(reversed(ctrl_types)):
+            ctrl_offsets[ct] = (7 - i) * 12  # row H=84, G=72, F=60 (0-based before +count)
+        k562_offset     = ctrl_offsets.get("K562", 0)
+        supermix_offset = ctrl_offsets.get("Supermix", 0)
+        blank_offset    = ctrl_offsets.get("Blank", 84)
+        ctrl_slot       = "Slot1"
+    else:
+        k562_offset     = 0
+        supermix_offset = 24
+        blank_offset    = 48
+        ctrl_slot       = "Slot2"
 
     counts        = {"K562": 0, "Supermix": 0, "Blank": 0}
     queue         = []
@@ -260,7 +276,7 @@ def build_queue_core(csv_bytes: bytes, p: dict) -> dict:
         pos = k562_offset + counts["K562"]
         sid = f"{date}_{initials}_{lc_short}_{ms_short}_{k562_load}_K562_{counts['K562']}"
         slot2_entries.append((pos, "K562", sid, True))
-        queue.append(make_row(f"Slot2.{pos}", sid, sample_path,
+        queue.append(make_row(f"{ctrl_slot}.{pos}", sid, sample_path,
                               sep_method, inj_method, ms_method, proc_method))
 
     def add_supermix():
@@ -268,7 +284,7 @@ def build_queue_core(csv_bytes: bytes, p: dict) -> dict:
         pos = supermix_offset + counts["Supermix"]
         sid = f"{date}_{initials}_{lc_short}_{ms_short}_{supermix_load}_Supermix_{counts['Supermix']}"
         slot2_entries.append((pos, "Supermix", sid, True))
-        queue.append(make_row(f"Slot2.{pos}", sid, sample_path,
+        queue.append(make_row(f"{ctrl_slot}.{pos}", sid, sample_path,
                               sep_method, inj_method, ms_method, proc_method))
 
     def add_blank():
@@ -276,7 +292,7 @@ def build_queue_core(csv_bytes: bytes, p: dict) -> dict:
         pos = blank_offset + counts["Blank"]
         sid = f"{date}_{initials}_{lc_short}_{ms_short}_Blank_{counts['Blank']}"
         slot2_entries.append((pos, "Blank", sid, True))
-        queue.append(make_row(f"Slot2.{pos}", sid, blank_path,
+        queue.append(make_row(f"{ctrl_slot}.{pos}", sid, blank_path,
                               sep_method, inj_method, ms_method, proc_method))
 
     for core in cores_seen:
@@ -371,13 +387,66 @@ def build_queue_core(csv_bytes: bytes, p: dict) -> dict:
                            legend_group_map=roi_to_core,
                            label_color_map=slot1_label_color)
 
-    # Slot2 CSV + PNG
-    slot2_grid      = {r: {c: "" for c in COLS} for r in ROWS}
-    slot2_type_grid = {r: {c: "" for c in COLS} for r in ROWS}
+    CTRL_COLORS       = {"K562": "#4C9BE8", "Supermix": "#F4A261", "Blank": "#B7E4C7"}
+    CTRL_COLORS_SPARE = {"K562": "#C5DDF7", "Supermix": "#FAE0C8", "Blank": "#E6F7EC"}
+
+    ctrl_color_map = {}
+    ctrl_label_map = {}
+    for pos, ctype, sid, in_queue in slot2_entries:
+        ctrl_color_map[sid] = (CTRL_COLORS if in_queue else CTRL_COLORS_SPARE).get(ctype, "white")
+        num = sid.split("_")[-1]
+        ctrl_label_map[sid] = f"{ctype}\n{num}"
+    sid_to_type = {sid: ctype for _, ctype, sid, _ in slot2_entries}
+
+    if one_slot:
+        # Merge controls into sample grid for a single combined plate
+        combined_grid = {r: {c: slot1_grid[r][c] for c in COLS} for r in ROWS}
+        combined_color_map  = dict(slot1_color_map)
+        combined_label_map  = {}
+        combined_lcolor_map = dict(slot1_label_color)
+        for pos, ctype, sid, _ in slot2_entries:
+            r, c = index_to_well(pos)
+            combined_grid[r][c]        = sid
+            combined_color_map[sid]    = ctrl_color_map[sid]
+            combined_label_map[sid]    = ctrl_label_map[sid]
+            combined_lcolor_map[sid]   = "black"
+        # Legend: cores + control types
+        combined_legend = dict(roi_to_core)
+        combined_legend.update(sid_to_type)
+        combined_png = plot_plate(combined_grid, combined_color_map,
+                                  f"Combined plate ({stem})",
+                                  label_map=combined_label_map,
+                                  legend_group_map=combined_legend,
+                                  label_color_map=combined_lcolor_map)
+
+        # Combined CSV
+        combined_buf = io.StringIO()
+        w = csv.writer(combined_buf)
+        w.writerow([""] + COLS)
+        for r in ROWS:
+            w.writerow([r] + [combined_grid[r][c] for c in COLS])
+
+        return {
+            "queue_csv":    queue_buf.getvalue().encode("utf-8"),
+            "queue_xlsx":   queue_xlsx,
+            "slot1_csv":    combined_buf.getvalue().encode("utf-8"),
+            "slot1_png":    combined_png,
+            "slot2_csv":    None,
+            "slot2_png":    None,
+            "n_queue":      len(queue),
+            "counts":       counts,
+            "k562_spares":  k562_spares,
+            "supermix_spares": supermix_spares,
+            "blank_spares": blank_spares,
+            "stem":         stem,
+            "one_slot":     True,
+        }
+
+    # Two-slot mode: Slot2 CSV + PNG
+    slot2_grid = {r: {c: "" for c in COLS} for r in ROWS}
     for pos, ctype, sid, _ in slot2_entries:
         r, c = index_to_well(pos)
-        slot2_grid[r][c]      = sid
-        slot2_type_grid[r][c] = ctype
+        slot2_grid[r][c] = sid
 
     slot2_buf = io.StringIO()
     w = csv.writer(slot2_buf)
@@ -385,17 +454,8 @@ def build_queue_core(csv_bytes: bytes, p: dict) -> dict:
     for r in ROWS:
         w.writerow([r] + [slot2_grid[r][c] for c in COLS])
 
-    CTRL_COLORS       = {"K562": "#4C9BE8", "Supermix": "#F4A261", "Blank": "#B7E4C7"}
-    CTRL_COLORS_SPARE = {"K562": "#C5DDF7", "Supermix": "#FAE0C8", "Blank": "#E6F7EC"}
-    slot2_color_map = {}
-    slot2_label_map = {}
-    for pos, ctype, sid, in_queue in slot2_entries:
-        slot2_color_map[sid] = (CTRL_COLORS if in_queue else CTRL_COLORS_SPARE).get(ctype, "white")
-        num = sid.split("_")[-1]
-        slot2_label_map[sid] = f"{ctype}\n{num}"
-    sid_to_type = {sid: ctype for _, ctype, sid, _ in slot2_entries}
-    slot2_png = plot_plate(slot2_grid, slot2_color_map, f"Slot2 - Controls ({stem})",
-                           label_map=slot2_label_map, legend_group_map=sid_to_type)
+    slot2_png = plot_plate(slot2_grid, ctrl_color_map, f"Slot2 - Controls ({stem})",
+                           label_map=ctrl_label_map, legend_group_map=sid_to_type)
 
     return {
         "queue_csv":    queue_buf.getvalue().encode("utf-8"),
@@ -410,24 +470,87 @@ def build_queue_core(csv_bytes: bytes, p: dict) -> dict:
         "supermix_spares": supermix_spares,
         "blank_spares": blank_spares,
         "stem":         stem,
+        "one_slot":     False,
     }
+
+# ============================================================
+# ONE-SLOT FEASIBILITY CHECK
+# ============================================================
+def check_one_slot_feasible(csv_bytes: bytes, use_k562: bool, use_supermix: bool):
+    """
+    Returns (feasible: bool, message: str).
+    Feasible if:
+      - each control type needs <= 12 vials (fits in one row)
+      - no sample well falls in the reserved bottom rows
+    """
+    text = csv_bytes.decode("utf-8-sig")
+    reader = csv.DictReader(io.StringIO(text))
+    reader.fieldnames = [h.strip() for h in reader.fieldnames]
+    all_rows = list(reader)
+    samples = [r for r in all_rows if r.get("Dropout {Y/N}", "").strip().upper() != "Y"]
+
+    def core_from_roi(name):
+        parts = name.split("_")
+        try:
+            int(parts[-1]); int(parts[-2])
+            return "_".join(parts[:-2]) or name
+        except (ValueError, IndexError):
+            return name
+
+    cores_seen, core_map = [], {}
+    for row in samples:
+        core = core_from_roi(row["ROI"].strip())
+        if core not in core_map:
+            core_map[core] = []
+            cores_seen.append(core)
+        core_map[core].append(row)
+
+    n_cores         = len(cores_seen)
+    k562_needed     = n_cores if use_k562 else 0
+    supermix_needed = n_cores if use_supermix else 0
+    blank_needed    = n_cores + sum(len(split_groups(core_map[c])) for c in cores_seen)
+
+    if k562_needed > 12:
+        return False, f"K562 needs {k562_needed} vials (max 12 per row)"
+    if supermix_needed > 12:
+        return False, f"Supermix needs {supermix_needed} vials (max 12 per row)"
+    if blank_needed > 12:
+        return False, f"Blank needs {blank_needed} vials (max 12 per row)"
+
+    # Determine which rows controls will occupy (from bottom up: H, G, F)
+    n_ctrl_rows = 1 + (1 if use_supermix else 0) + (1 if use_k562 else 0)
+    reserved = set(ROWS[8 - n_ctrl_rows:])
+
+    for row in samples:
+        w = row.get("Well_ID", "").strip()
+        if w and w[0].upper() in reserved:
+            return False, f"Sample in well {w} conflicts with control row {w[0].upper()}"
+
+    return True, (f"K562={k562_needed}, Supermix={supermix_needed}, Blank={blank_needed} "
+                  f"| control rows: {', '.join(sorted(reserved))}")
+
 
 def build_zip(res: dict) -> bytes:
     buf = io.BytesIO()
+    stem = res["stem"]
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr(f"{res['stem']}_queue.csv",   res["queue_csv"])
+        z.writestr(f"{stem}_queue.csv", res["queue_csv"])
         if res["queue_xlsx"]:
-            z.writestr(f"{res['stem']}_queue.xlsx", res["queue_xlsx"])
-        z.writestr(f"{res['stem']}_slot1.csv",   res["slot1_csv"])
-        z.writestr(f"{res['stem']}_slot2.csv",   res["slot2_csv"])
-        z.writestr(f"{res['stem']}_slot1.png",   res["slot1_png"])
-        z.writestr(f"{res['stem']}_slot2.png",   res["slot2_png"])
+            z.writestr(f"{stem}_queue.xlsx", res["queue_xlsx"])
+        if res.get("one_slot"):
+            z.writestr(f"{stem}_combined.csv", res["slot1_csv"])
+            z.writestr(f"{stem}_combined.png", res["slot1_png"])
+        else:
+            z.writestr(f"{stem}_slot1.csv", res["slot1_csv"])
+            z.writestr(f"{stem}_slot2.csv", res["slot2_csv"])
+            z.writestr(f"{stem}_slot1.png", res["slot1_png"])
+            z.writestr(f"{stem}_slot2.png", res["slot2_png"])
     return buf.getvalue()
 
 # ============================================================
 # SESSION STATE INIT
 # ============================================================
-for key in ("results", "zip_bytes", "last_file"):
+for key in ("results", "zip_bytes", "last_file", "one_slot"):
     if key not in st.session_state:
         st.session_state[key] = None
 
@@ -486,12 +609,24 @@ if uploaded and uploaded.name != st.session_state.last_file:
     st.session_state.results   = None
     st.session_state.zip_bytes = None
     st.session_state.last_file = uploaded.name
+    st.session_state.one_slot  = None
 
 if uploaded:
     stem = re.sub(r'^\d{8}', date, uploaded.name.replace(".csv", ""))
     st.caption(f"Output stem: `{stem}`")
 
-    if st.button("Generate queue", type="primary"):
+    feasible, reason = check_one_slot_feasible(uploaded.getvalue(), use_k562, use_supermix)
+
+    btn_cols = st.columns([2, 2, 3])
+    gen_clicked      = btn_cols[0].button("Generate queue", type="primary")
+    one_slot_clicked = btn_cols[1].button("Fit into one slot", type="secondary",
+                                          disabled=not feasible)
+    if feasible:
+        btn_cols[2].success(f"One-slot possible: {reason}")
+    else:
+        btn_cols[2].caption(f"One-slot not possible: {reason}")
+
+    def _run(one_slot: bool):
         params = dict(
             date=date, initials=initials, lc_short=lc_short, ms_short=ms_short,
             sample_load=sample_load, k562_load=k562_load, supermix_load=supermix_load,
@@ -499,11 +634,18 @@ if uploaded:
             sep_method=sep_method, inj_method=inj_method,
             ms_method=ms_method, proc_method=proc_method,
             sample_path=sample_path, blank_path=blank_path, stem=stem,
+            one_slot=one_slot,
         )
         with st.spinner("Generating..."):
             res = build_queue_core(uploaded.getvalue(), params)
             st.session_state.results   = res
             st.session_state.zip_bytes = build_zip(res)
+            st.session_state.one_slot  = one_slot
+
+    if gen_clicked:
+        _run(False)
+    if one_slot_clicked:
+        _run(True)
 
 # ============================================================
 # SIDEBAR — settings summary (read-only)
@@ -543,13 +685,17 @@ if st.session_state.results:
         f"Blank: {c['Blank']} (+{res['blank_spares']} spare)"
     )
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Slot 1 — Samples")
+    if res.get("one_slot"):
+        st.subheader("Combined Plate — Samples + Controls")
         st.image(res["slot1_png"], use_container_width=True)
-    with col2:
-        st.subheader("Slot 2 — Controls")
-        st.image(res["slot2_png"], use_container_width=True)
+    else:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Slot 1 — Samples")
+            st.image(res["slot1_png"], use_container_width=True)
+        with col2:
+            st.subheader("Slot 2 — Controls")
+            st.image(res["slot2_png"], use_container_width=True)
 
     st.subheader("Downloads")
     st.download_button("⬇ Download all (zip)", st.session_state.zip_bytes,
@@ -557,18 +703,31 @@ if st.session_state.results:
                        type="primary")
     st.markdown("---")
 
-    cols = st.columns(6)
-    cols[0].download_button("Queue CSV",   res["queue_csv"],
-                            file_name=f"{stem}_queue.csv",  mime="text/csv")
-    if res["queue_xlsx"]:
-        cols[1].download_button("Queue XLSX", res["queue_xlsx"],
-                                file_name=f"{stem}_queue.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    cols[2].download_button("Slot1 CSV",  res["slot1_csv"],
-                            file_name=f"{stem}_slot1.csv",  mime="text/csv")
-    cols[3].download_button("Slot2 CSV",  res["slot2_csv"],
-                            file_name=f"{stem}_slot2.csv",  mime="text/csv")
-    cols[4].download_button("Slot1 PNG",  res["slot1_png"],
-                            file_name=f"{stem}_slot1.png",  mime="image/png")
-    cols[5].download_button("Slot2 PNG",  res["slot2_png"],
-                            file_name=f"{stem}_slot2.png",  mime="image/png")
+    if res.get("one_slot"):
+        cols = st.columns(4)
+        cols[0].download_button("Queue CSV",  res["queue_csv"],
+                                file_name=f"{stem}_queue.csv", mime="text/csv")
+        if res["queue_xlsx"]:
+            cols[1].download_button("Queue XLSX", res["queue_xlsx"],
+                                    file_name=f"{stem}_queue.xlsx",
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        cols[2].download_button("Plate CSV",  res["slot1_csv"],
+                                file_name=f"{stem}_combined.csv", mime="text/csv")
+        cols[3].download_button("Plate PNG",  res["slot1_png"],
+                                file_name=f"{stem}_combined.png", mime="image/png")
+    else:
+        cols = st.columns(6)
+        cols[0].download_button("Queue CSV",   res["queue_csv"],
+                                file_name=f"{stem}_queue.csv",  mime="text/csv")
+        if res["queue_xlsx"]:
+            cols[1].download_button("Queue XLSX", res["queue_xlsx"],
+                                    file_name=f"{stem}_queue.xlsx",
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        cols[2].download_button("Slot1 CSV",  res["slot1_csv"],
+                                file_name=f"{stem}_slot1.csv",  mime="text/csv")
+        cols[3].download_button("Slot2 CSV",  res["slot2_csv"],
+                                file_name=f"{stem}_slot2.csv",  mime="text/csv")
+        cols[4].download_button("Slot1 PNG",  res["slot1_png"],
+                                file_name=f"{stem}_slot1.png",  mime="image/png")
+        cols[5].download_button("Slot2 PNG",  res["slot2_png"],
+                                file_name=f"{stem}_slot2.png",  mime="image/png")
