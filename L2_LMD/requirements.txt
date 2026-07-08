@@ -1,0 +1,9 @@
+streamlit>=1.46
+geopandas>=1.1
+shapely>=2.1
+numpy>=2.0
+pandas>=2.3
+py-lmd>=1.0,<2
+openpyxl>=3.1
+matplotlib>=3.9
+loguru>=0.7
