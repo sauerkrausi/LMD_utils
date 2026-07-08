@@ -92,7 +92,7 @@ MS_OPTIONS = list(MS_METHODS.keys()) + ["Custom"]
 def well_to_slot1(well_id):
     row = ord(well_id[0].upper()) - ord('A')
     col = int(well_id[1:])
-    return f"Slot1.{row * 12 + col}"
+    return f"1:{row * 12 + col}"
 
 def index_to_well(index):
     i = index - 1
@@ -260,12 +260,12 @@ def build_queue_core(csv_bytes: bytes, p: dict) -> dict:
         k562_offset     = ctrl_offsets.get("K562", 0)
         supermix_offset = ctrl_offsets.get("Supermix", 0)
         blank_offset    = ctrl_offsets.get("Blank", 84)
-        ctrl_slot       = "Slot1"
+        ctrl_slot       = "1"
     else:
         k562_offset     = 0
         supermix_offset = 24
         blank_offset    = 48
-        ctrl_slot       = "Slot2"
+        ctrl_slot       = "2"
 
     counts        = {"K562": 0, "Supermix": 0, "Blank": 0}
     queue         = []
@@ -276,7 +276,7 @@ def build_queue_core(csv_bytes: bytes, p: dict) -> dict:
         pos = k562_offset + counts["K562"]
         sid = f"{date}_{initials}_{lc_short}_{ms_short}_{k562_load}_K562_{counts['K562']}"
         slot2_entries.append((pos, "K562", sid, True))
-        queue.append(make_row(f"{ctrl_slot}.{pos}", sid, sample_path,
+        queue.append(make_row(f"{ctrl_slot}:{pos}", sid, sample_path,
                               sep_method, inj_method, ms_method, proc_method))
 
     def add_supermix():
@@ -284,7 +284,7 @@ def build_queue_core(csv_bytes: bytes, p: dict) -> dict:
         pos = supermix_offset + counts["Supermix"]
         sid = f"{date}_{initials}_{lc_short}_{ms_short}_{supermix_load}_Supermix_{counts['Supermix']}"
         slot2_entries.append((pos, "Supermix", sid, True))
-        queue.append(make_row(f"{ctrl_slot}.{pos}", sid, sample_path,
+        queue.append(make_row(f"{ctrl_slot}:{pos}", sid, sample_path,
                               sep_method, inj_method, ms_method, proc_method))
 
     def add_blank():
@@ -292,7 +292,7 @@ def build_queue_core(csv_bytes: bytes, p: dict) -> dict:
         pos = blank_offset + counts["Blank"]
         sid = f"{date}_{initials}_{lc_short}_{ms_short}_Blank_{counts['Blank']}"
         slot2_entries.append((pos, "Blank", sid, True))
-        queue.append(make_row(f"{ctrl_slot}.{pos}", sid, blank_path,
+        queue.append(make_row(f"{ctrl_slot}:{pos}", sid, blank_path,
                               sep_method, inj_method, ms_method, proc_method))
 
     for core in cores_seen:
@@ -534,7 +534,6 @@ def build_zip(res: dict) -> bytes:
     buf = io.BytesIO()
     stem = res["stem"]
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr(f"{stem}_queue.csv", res["queue_csv"])
         if res["queue_xlsx"]:
             z.writestr(f"{stem}_queue.xlsx", res["queue_xlsx"])
         if res.get("one_slot"):
@@ -573,7 +572,7 @@ ms_short = c3.text_input("Custom MS_SHORT", value="") if ms_sel == "Custom" else
 
 # Row 2: loads + controls
 c4, c5, c6, c7, c8 = st.columns([1, 1, 1, 1, 1])
-sample_load  = c4.text_input("Sample load", value="1ng")
+sample_load  = c4.text_input("Sample load", value="20ul")
 use_k562     = c5.checkbox("Include K562", value=True)
 k562_load    = c6.text_input("K562 load",    value="1ng")  if use_k562    else ""
 use_supermix = c7.checkbox("Include Supermix", value=True)
@@ -704,30 +703,26 @@ if st.session_state.results:
     st.markdown("---")
 
     if res.get("one_slot"):
-        cols = st.columns(4)
-        cols[0].download_button("Queue CSV",  res["queue_csv"],
-                                file_name=f"{stem}_queue.csv", mime="text/csv")
+        cols = st.columns(3)
         if res["queue_xlsx"]:
-            cols[1].download_button("Queue XLSX", res["queue_xlsx"],
+            cols[0].download_button("Queue XLSX", res["queue_xlsx"],
                                     file_name=f"{stem}_queue.xlsx",
                                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        cols[2].download_button("Plate CSV",  res["slot1_csv"],
+        cols[1].download_button("Plate CSV",  res["slot1_csv"],
                                 file_name=f"{stem}_combined.csv", mime="text/csv")
-        cols[3].download_button("Plate PNG",  res["slot1_png"],
+        cols[2].download_button("Plate PNG",  res["slot1_png"],
                                 file_name=f"{stem}_combined.png", mime="image/png")
     else:
-        cols = st.columns(6)
-        cols[0].download_button("Queue CSV",   res["queue_csv"],
-                                file_name=f"{stem}_queue.csv",  mime="text/csv")
+        cols = st.columns(5)
         if res["queue_xlsx"]:
-            cols[1].download_button("Queue XLSX", res["queue_xlsx"],
+            cols[0].download_button("Queue XLSX", res["queue_xlsx"],
                                     file_name=f"{stem}_queue.xlsx",
                                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        cols[2].download_button("Slot1 CSV",  res["slot1_csv"],
+        cols[1].download_button("Slot1 CSV",  res["slot1_csv"],
                                 file_name=f"{stem}_slot1.csv",  mime="text/csv")
-        cols[3].download_button("Slot2 CSV",  res["slot2_csv"],
+        cols[2].download_button("Slot2 CSV",  res["slot2_csv"],
                                 file_name=f"{stem}_slot2.csv",  mime="text/csv")
-        cols[4].download_button("Slot1 PNG",  res["slot1_png"],
+        cols[3].download_button("Slot1 PNG",  res["slot1_png"],
                                 file_name=f"{stem}_slot1.png",  mime="image/png")
-        cols[5].download_button("Slot2 PNG",  res["slot2_png"],
+        cols[4].download_button("Slot2 PNG",  res["slot2_png"],
                                 file_name=f"{stem}_slot2.png",  mime="image/png")
