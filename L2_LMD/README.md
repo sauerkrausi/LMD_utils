@@ -108,7 +108,6 @@ Apache-2.0 license.
 
 **Inspiration and workflow reference:**  
 [Qupath_to_LMD](https://github.com/CosciaLab/Qupath_to_LMD) — Coscia Lab, MDC Berlin.
-GPL-3.0 license.
 
 ---
 
