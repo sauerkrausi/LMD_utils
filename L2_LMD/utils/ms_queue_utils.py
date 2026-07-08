@@ -12,6 +12,7 @@ Outputs: queue XLSX + slot plate CSVs + plate map PNGs (zip).
 import csv
 import datetime
 import io
+import json
 import math
 import re
 import zipfile
@@ -618,9 +619,45 @@ def render_ms_queue_tab():
     st.subheader("Downloads")
     stem_out = res["stem"]
 
-    st.download_button("Download all (zip)", st.session_state.msq_zip,
-                       file_name=f"{stem_out}_ms_queue.zip",
-                       mime="application/zip", type="primary")
+    # All-steps zip: bundle everything available from tabs 1-4
+    def build_all_zip(res: dict, msq_zip_bytes: bytes) -> bytes:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            # Tab 1
+            if st.session_state.get("t1_geojson") and st.session_state.get("t1_stem"):
+                z.writestr(f"{st.session_state.t1_stem}_reclassified.geojson",
+                           st.session_state.t1_geojson)
+            # Tab 2
+            if st.session_state.get("t2_xml") and st.session_state.get("t2_stem"):
+                z.writestr(f"{st.session_state.t2_stem}.xml", st.session_state.t2_xml)
+            if st.session_state.get("t2_saw"):
+                z.writestr("samples_and_wells.json",
+                           json.dumps(st.session_state.t2_saw, indent=2).encode("utf-8"))
+            # Tab 3
+            if st.session_state.get("proc_result"):
+                r3   = st.session_state.proc_result
+                s3   = r3["stem"]
+                z.writestr(f"{s3}_sorted.xml",        r3["sorted_xml"])
+                z.writestr(f"{s3}_96wellplate.csv",   r3["wellplate_csv"])
+                z.writestr(f"{s3}_platemap.png",      st.session_state.proc_png)
+            # Always include the current (possibly dropout-updated) sample list
+            if st.session_state.get("t3_sample_list"):
+                z.writestr(f"{stem_out}_sample_list.csv", st.session_state.t3_sample_list)
+            # Tab 4
+            with zipfile.ZipFile(io.BytesIO(msq_zip_bytes)) as msq_z:
+                for name in msq_z.namelist():
+                    z.writestr(name, msq_z.read(name))
+        return buf.getvalue()
+
+    dl_all, dl_ms = st.columns(2)
+    dl_all.download_button(
+        "Download all steps (zip)", build_all_zip(res, st.session_state.msq_zip),
+        file_name=f"{stem_out}_all_steps.zip", mime="application/zip", type="primary"
+    )
+    dl_ms.download_button(
+        "Download MS queue only (zip)", st.session_state.msq_zip,
+        file_name=f"{stem_out}_ms_queue.zip", mime="application/zip"
+    )
     st.markdown("---")
 
     if res.get("one_slot"):
