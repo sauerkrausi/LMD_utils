@@ -92,7 +92,7 @@ MS_OPTIONS = list(MS_METHODS.keys()) + ["Custom"]
 def well_to_slot1(well_id):
     row = ord(well_id[0].upper()) - ord('A')
     col = int(well_id[1:])
-    return f"1:{row * 12 + col}"
+    return f"Slot1:{row * 12 + col}"
 
 def index_to_well(index):
     i = index - 1
@@ -260,12 +260,12 @@ def build_queue_core(csv_bytes: bytes, p: dict) -> dict:
         k562_offset     = ctrl_offsets.get("K562", 0)
         supermix_offset = ctrl_offsets.get("Supermix", 0)
         blank_offset    = ctrl_offsets.get("Blank", 84)
-        ctrl_slot       = "1"
+        ctrl_slot       = "Slot1"
     else:
         k562_offset     = 0
         supermix_offset = 24
         blank_offset    = 48
-        ctrl_slot       = "2"
+        ctrl_slot       = "Slot2"
 
     counts        = {"K562": 0, "Supermix": 0, "Blank": 0}
     queue         = []
