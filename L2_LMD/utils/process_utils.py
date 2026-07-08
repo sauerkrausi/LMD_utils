@@ -345,4 +345,77 @@ def render_process_tab():
         dl4.download_button("Plate PNG", st.session_state.proc_png,
                             file_name=f"{stem_out}_platemap.png", mime="image/png")
 
-        st.caption("Sample list is available in Tab 4 (MS Queue) without re-uploading.")
+        # --------------------------------------------------------
+        # DROPOUT EDITOR
+        # --------------------------------------------------------
+        st.divider()
+        st.subheader("Stereomicroscope QC — Mark Dropouts")
+        st.caption(
+            "After inspecting the 96-well plate under the stereomicroscope, "
+            "tick the Dropout checkbox for any failed wells. "
+            "Dropouts are excluded from the MS queue but kept in the plate map (grey). "
+            "Alternatively, upload an updated sample list CSV with `Dropout {Y/N}` filled in."
+        )
+
+        # Option A: interactive editor
+        raw_csv  = st.session_state.get("t3_sample_list") or result["sample_list_csv"]
+        df       = pd.read_csv(io.BytesIO(raw_csv))
+        df.columns = [c.strip() for c in df.columns]
+
+        # Normalise dropout column to bool for the editor
+        dropout_col = "Dropout {Y/N}"
+        if dropout_col not in df.columns:
+            df[dropout_col] = False
+        else:
+            df[dropout_col] = df[dropout_col].apply(
+                lambda v: True if str(v).strip().upper() == "Y" else False
+            )
+
+        edited_df = st.data_editor(
+            df,
+            column_config={
+                dropout_col: st.column_config.CheckboxColumn("Dropout?", default=False),
+            },
+            disabled=[c for c in df.columns if c != dropout_col],
+            hide_index=True,
+            use_container_width=True,
+            key="proc_dropout_editor",
+        )
+
+        # Option B: upload updated CSV
+        updated_upload = st.file_uploader(
+            "Or upload updated sample list CSV", type=["csv"], key="proc_updated_csv"
+        )
+
+        apply_col, dl_col = st.columns([1, 1])
+
+        if apply_col.button("Apply dropout changes", type="primary", key="proc_apply_dropout"):
+            if updated_upload is not None:
+                # Use uploaded CSV directly
+                updated_csv = updated_upload.getvalue()
+            else:
+                # Convert bool back to Y/N and serialise
+                out_df = edited_df.copy()
+                out_df[dropout_col] = out_df[dropout_col].apply(lambda v: "Y" if v else "")
+                buf = io.StringIO()
+                out_df.to_csv(buf, index=False)
+                updated_csv = buf.getvalue().encode("utf-8")
+
+            st.session_state.t3_sample_list = updated_csv
+            n_dropouts = edited_df[dropout_col].sum() if updated_upload is None else (
+                pd.read_csv(io.BytesIO(updated_csv))[dropout_col]
+                  .apply(lambda v: str(v).strip().upper() == "Y").sum()
+            )
+            st.success(f"Dropout list updated — {int(n_dropouts)} dropout(s) marked. "
+                       "Tab 4 will exclude these from the queue.")
+
+        # Download the current (possibly updated) sample list
+        current_csv = st.session_state.get("t3_sample_list") or result["sample_list_csv"]
+        dl_col.download_button(
+            "Download updated sample list",
+            current_csv,
+            file_name=f"{stem_out}_sample_list.csv",
+            mime="text/csv",
+        )
+
+        st.caption("Tab 4 (MS Queue) uses this sample list — apply dropout changes before generating the queue.")
