@@ -132,11 +132,16 @@ def process_collection(xml_bytes: bytes, saw_dict: dict, stem: str) -> dict:
         if cap_el is not None:
             cap_el.text = new_well
 
-        children    = list(el)
-        cap_pos     = children.index(cap_el) if cap_el is not None else 0
-        transfer_el = ET.Element("TransferID")
-        transfer_el.text = sample_name
-        el.insert(cap_pos, transfer_el)
+        # Update existing TransferID or insert after CapID
+        existing_tid = el.find("TransferID")
+        if existing_tid is not None:
+            existing_tid.text = sample_name
+        else:
+            children    = list(el)
+            cap_pos     = children.index(cap_el) if cap_el is not None else 0
+            transfer_el = ET.Element("TransferID")
+            transfer_el.text = sample_name
+            el.insert(cap_pos + 1, transfer_el)
         root.append(el)
 
     indent_xml(root)
