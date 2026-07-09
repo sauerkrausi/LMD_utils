@@ -100,7 +100,7 @@ def build_xml_bytes(calib_pts: np.ndarray, polygons: list, well_map: dict) -> by
     col = Collection(calibration_points=calib_pts)
     for p in polygons:
         coords = polygon_exterior(p["geom"])
-        col.new_shape(coords, well=well_map.get(p["name"], "A1"), name=p["name"])
+        col.new_shape(coords, well=well_map.get(p["name"], "A1"), name=p["name"], TransferID=p["name"])
 
     with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as f:
         tmppath = f.name
