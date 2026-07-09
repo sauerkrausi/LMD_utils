@@ -97,15 +97,37 @@ def assign_wells(polygons: list, randomize: bool = False, seed: int = 42) -> dic
 
 
 def build_xml_bytes(calib_pts: np.ndarray, polygons: list, well_map: dict) -> bytes:
+    import xml.etree.ElementTree as ET
+
+    # Build name->well reverse map for TransferID injection
+    well_to_name = {v: k for k, v in well_map.items()}
+
     col = Collection(calibration_points=calib_pts)
     for p in polygons:
         coords = polygon_exterior(p["geom"])
-        col.new_shape(coords, well=well_map.get(p["name"], "A1"), name=p["name"], TransferID=p["name"])
+        col.new_shape(coords, well=well_map.get(p["name"], "A1"), name=p["name"])
 
     with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as f:
         tmppath = f.name
     try:
         col.save(tmppath)
+        # Inject <TransferID> after <CapID> for each shape (version-independent)
+        tree = ET.parse(tmppath)
+        root = tree.getroot()
+        for el in root:
+            if not el.tag.startswith("Shape_"):
+                continue
+            cap_el = el.find("CapID")
+            if cap_el is None:
+                continue
+            sample_name = well_to_name.get(cap_el.text.strip() if cap_el.text else "", "")
+            if el.find("TransferID") is None and sample_name:
+                children = list(el)
+                cap_pos = children.index(cap_el)
+                tid = ET.Element("TransferID")
+                tid.text = sample_name
+                el.insert(cap_pos + 1, tid)
+        tree.write(tmppath, encoding="UTF-8", xml_declaration=True)
         with open(tmppath, "rb") as f:
             return f.read()
     finally:
