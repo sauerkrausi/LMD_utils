@@ -40,7 +40,7 @@ QuPath export (.geojson)
 
 ## Tabs
 
-### Tab 1 — Reclassify GeoJSON
+### Tab 1: Reclassify GeoJSON
 Copies `properties.name` into `properties.classification.name` for each annotation.
 Required before conversion if QuPath annotations were drawn without a class assigned.
 Optional if annotations already have classification set.
@@ -48,7 +48,7 @@ Optional if annotations already have classification set.
 **Input:** `*.geojson` from QuPath export  
 **Output:** `*_reclassified.geojson`
 
-### Tab 2 — Convert to LMD XML
+### Tab 2: Convert to LMD XML
 Converts the reclassified GeoJSON to LMD XML using the `py-lmd` library.
 
 - Select 3 calibration points from the GeoJSON
@@ -58,7 +58,7 @@ Converts the reclassified GeoJSON to LMD XML using the `py-lmd` library.
 **Input:** `*_reclassified.geojson` (from Tab 1 or upload)  
 **Output:** `*.xml`, `samples_and_wells.json`, `collection.png`
 
-### Tab 3 — Process LMD Collection
+### Tab 3: Process LMD Collection
 Sorts the LMD XML by well order, renumbers shapes, assigns new well positions,
 and generates all downstream files.
 
@@ -68,7 +68,7 @@ and generates all downstream files.
 
 **Output:** `*_sorted.xml`, `*_96wellplate.csv`, `*_sample_list.csv`, `*_platemap.png`
 
-### Tab 4 — MS Sample Queue
+### Tab 4: MS Sample Queue
 Generates the Bruker timsTOF instrument queue from the sample list CSV.
 
 - K562, Supermix, Blank controls with configurable loads
@@ -108,6 +108,7 @@ Apache-2.0 license.
 
 **Inspiration and workflow reference:**  
 [Qupath_to_LMD](https://github.com/CosciaLab/Qupath_to_LMD) — Coscia Lab, MDC Berlin.
+GPL-3.0 license.
 
 ---
 
