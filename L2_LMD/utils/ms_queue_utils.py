@@ -179,22 +179,62 @@ def suggest_group(name: str) -> str:
 
 
 # ============================================================
-# CONTROL ALLOCATOR — dynamic multi-slot
+# CONTROL COUNTING (pre-pass)
+# ============================================================
+def count_controls(groups_seen, group_map, use_k562, use_supermix):
+    """Pre-count controls needed to compute row-band offsets."""
+    k562_used     = len(groups_seen) if use_k562     else 0
+    supermix_used = len(groups_seen) if use_supermix else 0
+    blank_used    = sum(1 + len(split_groups(group_map[g])) for g in groups_seen)
+
+    k562_spares     = max(3, math.ceil(k562_used     * 0.10)) if use_k562     else 0
+    supermix_spares = max(3, math.ceil(supermix_used * 0.10)) if use_supermix else 0
+    blank_spares    = max(3, math.ceil(blank_used    * 0.10))
+
+    return {
+        "k562_total":     k562_used + k562_spares,
+        "supermix_total": supermix_used + supermix_spares,
+        "blank_total":    blank_used + blank_spares,
+        "k562_used":      k562_used,
+        "supermix_used":  supermix_used,
+        "blank_used":     blank_used,
+        "k562_spares":    k562_spares,
+        "supermix_spares":supermix_spares,
+        "blank_spares":   blank_spares,
+    }
+
+
+# ============================================================
+# CONTROL ALLOCATOR — row-banded, dynamic multi-slot
 # ============================================================
 class ControlAllocator:
-    """Assigns controls to sequential positions across Slot2, Slot3, ..."""
-    def __init__(self, start_slot: int = 2):
-        self.slot    = start_slot
-        self.pos     = 0
-        self.entries = []   # (slot, pos, ctype, sid, in_queue)
+    """
+    Assigns K562 / Supermix / Blank to separate row bands so each
+    type occupies contiguous rows (no empty-row gaps between types).
+    Overflows to Slot3, Slot4, ... as needed.
+    """
+    def __init__(self, ctrl_counts: dict, use_k562: bool, use_supermix: bool,
+                 start_slot: int = 2):
+        k562_rows     = math.ceil(ctrl_counts["k562_total"]     / 12) if use_k562     else 0
+        supermix_rows = math.ceil(ctrl_counts["supermix_total"] / 12) if use_supermix else 0
+
+        # 1-indexed absolute position offsets per type
+        self._offsets = {
+            "K562":     0,
+            "Supermix": k562_rows * 12,
+            "Blank":    (k562_rows + supermix_rows) * 12,
+        }
+        self._counts     = {"K562": 0, "Supermix": 0, "Blank": 0}
+        self._start_slot = start_slot
+        self.entries     = []   # (slot, pos, ctype, sid, in_queue)
 
     def add(self, ctype: str, sid: str, in_queue: bool = True) -> str:
-        self.pos += 1
-        if self.pos > 96:
-            self.slot += 1
-            self.pos  = 1
-        self.entries.append((self.slot, self.pos, ctype, sid, in_queue))
-        return f"Slot{self.slot}:{self.pos}"
+        self._counts[ctype] += 1
+        abs_pos  = self._offsets[ctype] + self._counts[ctype]
+        slot     = self._start_slot + (abs_pos - 1) // 96
+        slot_pos = ((abs_pos - 1) % 96) + 1
+        self.entries.append((slot, slot_pos, ctype, sid, in_queue))
+        return f"Slot{slot}:{slot_pos}"
 
     def plates(self) -> dict:
         """Return {slot_num: {row: {col: sid}}} for all used ctrl slots."""
@@ -251,9 +291,11 @@ def build_queue_core(csv_bytes: bytes, group_assignments: dict, p: dict) -> dict
             groups_seen.append(grp)
         group_map[grp].append(row)
 
-    alloc  = ControlAllocator(start_slot=2)
-    counts = {"K562": 0, "Supermix": 0, "Blank": 0}
-    queue  = []
+    # Pre-count controls to set row-band offsets
+    ctrl_counts = count_controls(groups_seen, group_map, use_k562, use_supermix)
+    alloc       = ControlAllocator(ctrl_counts, use_k562, use_supermix, start_slot=2)
+    counts      = {"K562": 0, "Supermix": 0, "Blank": 0}
+    queue       = []
 
     def add_k562():
         counts["K562"] += 1
@@ -286,10 +328,10 @@ def build_queue_core(csv_bytes: bytes, group_assignments: dict, p: dict) -> dict
                                       sep_method, inj_method, ms_method, proc_method))
             add_blank()
 
-    # Spares (added to ctrl slots, not in queue)
-    k562_spares     = max(3, math.ceil(counts["K562"]     * 0.10)) if use_k562     else 0
-    supermix_spares = max(3, math.ceil(counts["Supermix"] * 0.10)) if use_supermix else 0
-    blank_spares    = max(3, math.ceil(counts["Blank"]    * 0.10))
+    # Spares (pre-counted — added to ctrl slots, not in queue)
+    k562_spares     = ctrl_counts["k562_spares"]
+    supermix_spares = ctrl_counts["supermix_spares"]
+    blank_spares    = ctrl_counts["blank_spares"]
 
     for i in range(1, k562_spares + 1):
         n   = counts["K562"] + i
