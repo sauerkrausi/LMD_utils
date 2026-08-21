@@ -270,7 +270,9 @@ def build_queue_core(csv_bytes: bytes, group_assignments: dict, p: dict) -> dict
     proc_method   = p["proc_method"]
     sample_path   = p["sample_path"]
     blank_path    = p["blank_path"]
-    stem          = p["stem"]
+    stem             = p["stem"]
+    sample_slot      = p.get("sample_slot", "Slot1")
+    ctrl_start_slot  = p.get("ctrl_start_slot", 2)
 
     text   = csv_bytes.decode("utf-8-sig")
     reader = csv.DictReader(io.StringIO(text))
@@ -293,7 +295,7 @@ def build_queue_core(csv_bytes: bytes, group_assignments: dict, p: dict) -> dict
 
     # Pre-count controls to set row-band offsets
     ctrl_counts = count_controls(groups_seen, group_map, use_k562, use_supermix)
-    alloc       = ControlAllocator(ctrl_counts, use_k562, use_supermix, start_slot=2)
+    alloc       = ControlAllocator(ctrl_counts, use_k562, use_supermix, start_slot=ctrl_start_slot)
     counts      = {"K562": 0, "Supermix": 0, "Blank": 0}
     queue       = []
 
@@ -321,10 +323,10 @@ def build_queue_core(csv_bytes: bytes, group_assignments: dict, p: dict) -> dict
         add_blank()
         for batch in split_groups(group_map[grp]):
             for row in batch:
-                roi  = row["ROI"].strip()
-                vial = well_to_slot1(row["Well_ID"].strip())
-                sid  = f"{date}_{initials}_{lc_short}_{ms_short}_{sample_load}_{roi}"
-                queue.append(make_row(vial, sid, sample_path,
+                roi      = row["ROI"].strip()
+                well_pos = well_to_slot1(row["Well_ID"].strip()).replace("Slot1", sample_slot)
+                sid      = f"{date}_{initials}_{lc_short}_{ms_short}_{sample_load}_{roi}"
+                queue.append(make_row(well_pos, sid, sample_path,
                                       sep_method, inj_method, ms_method, proc_method))
             add_blank()
 
@@ -392,7 +394,7 @@ def build_queue_core(csv_bytes: bytes, group_assignments: dict, p: dict) -> dict
                     slot1_label_color[roi] = "black"
 
     roi_to_group = {roi: well_to_group.get(roi, roi) for roi in slot1_color_map}
-    slot1_png    = plot_plate(slot1_grid, slot1_color_map, f"Slot1 - Samples ({stem})",
+    slot1_png    = plot_plate(slot1_grid, slot1_color_map, f"{sample_slot} - Samples ({stem})",
                               legend_group_map=roi_to_group,
                               label_color_map=slot1_label_color)
 
@@ -434,6 +436,7 @@ def build_queue_core(csv_bytes: bytes, group_assignments: dict, p: dict) -> dict
         "blank_spares":    blank_spares,
         "stem":            stem,
         "groups":          groups_seen,
+        "sample_slot":     sample_slot,
     }
 
 
@@ -482,6 +485,11 @@ def render_ms_queue_tab():
     k562_load     = c6.text_input("K562 load",      value="1ng",  key="msq_k562l") if use_k562     else ""
     use_supermix  = c7.checkbox("Supermix",         value=True,   key="msq_smix")
     supermix_load = c8.text_input("Supermix load",  value="20ng", key="msq_smixl") if use_supermix else ""
+
+    SLOT_OPTIONS = [f"Slot{i}" for i in range(1, 7)]
+    cs1, cs2 = st.columns(2)
+    sample_slot    = cs1.selectbox("Sample plate slot",   SLOT_OPTIONS, index=0, key="msq_sample_slot")
+    ctrl_slot_base = cs2.selectbox("Controls start slot", SLOT_OPTIONS, index=1, key="msq_ctrl_slot")
 
     with st.expander("Instrument method paths", expanded=False):
         default_sep              = LC_METHODS.get(lc_short, "")
@@ -608,6 +616,8 @@ def render_ms_queue_tab():
             ms_method=ms_method, proc_method=proc_method,
             sample_path=sample_path, blank_path=blank_path,
             stem=stem,
+            sample_slot=sample_slot,
+            ctrl_start_slot=int(ctrl_slot_base.replace("Slot", "")),
         )
         with st.spinner("Generating..."):
             res = build_queue_core(csv_bytes, group_assignments, params)
@@ -629,7 +639,7 @@ def render_ms_queue_tab():
     )
 
     # Plate maps — Slot1 + ctrl slots side by side (max 3 per row)
-    all_plate_items = [("Slot1 - Samples", res["slot1_png"])] + [
+    all_plate_items = [(f"{res.get('sample_slot','Slot1')} - Samples", res["slot1_png"])] + [
         (f"Slot{sn} - Controls", data["png"])
         for sn, data in res["ctrl_slots"].items()
     ]
