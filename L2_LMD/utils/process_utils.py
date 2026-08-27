@@ -310,19 +310,19 @@ def render_process_tab():
     t2_stem   = st.session_state.get("t2_stem")
 
     source = None
-    if t2_plates is not None and t2_saw is not None:
-        st.info(f"Using {len(t2_plates)} plate(s) piped from Tab 2.")
-        if st.checkbox("Use piped data from Tab 2", value=True):
-            source = "pipe"
-
     uploaded_zip = st.file_uploader(
-        "Or upload collection zip (from Tab 2 download)",
+        "Upload collection zip (from Tab 2 download)",
         type=["zip"], key="proc_upload"
     )
+
     if uploaded_zip is not None:
         source = "zip"
+    elif t2_plates is not None and t2_saw is not None:
+        st.info(f"Using {len(t2_plates)} plate(s) piped from Tab 2.")
+        source = "pipe"
 
     if source is None:
+        st.info("Convert GeoJSON in Tab 2 first, or upload a zip here.")
         st.stop()
 
     # Extract plates + saw

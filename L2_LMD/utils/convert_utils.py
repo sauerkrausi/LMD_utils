@@ -7,10 +7,11 @@ Workflow:
   1. Parse GeoJSON: extract Point features (calibration candidates) + Polygon ROIs
   2. User selects 3 calibration points (from Points or manual entry)
      -> shows how many ROI centroids fall within the calibration triangle
-  3. Wells assigned alphabetically (A1..H12) or randomized
-     -> 96-well preview plate map
-  4. Collection built and saved as XML
-  5. samples_and_wells.json {annotation_name: well_id} piped to Tab 3
+  3. Wells assigned alphabetically across as many 96-well plates as needed
+     -> plate selector dropdown for per-plate preview
+  4. One Collection built per plate, saved as XML
+  5. Downloads: zip of all XMLs + samples_and_wells.json {name: "Plate1_A1"}
+  6. Piped to Tab 3 via session_state.t2_plates / t2_saw / t2_stem / t2_zip
 """
 
 import io
@@ -18,6 +19,7 @@ import json
 import os
 import random
 import tempfile
+import zipfile
 
 import matplotlib
 matplotlib.use("Agg")
@@ -89,29 +91,43 @@ def count_inside_triangle(calib_pts: np.ndarray, polygons: list):
 
 
 def assign_wells(polygons: list, randomize: bool = False, seed: int = 42) -> dict:
+    """Returns {name: 'Plate1_A1'} across as many 96-well plates as needed."""
     names = sorted(set(p["name"] for p in polygons))
-    wells = list(ALL_WELLS[:len(names)])
     if randomize:
-        random.Random(seed).shuffle(wells)
-    return dict(zip(names, wells))
+        random.Random(seed).shuffle(names)
+    result = {}
+    for i, name in enumerate(names):
+        plate_num    = i // 96 + 1
+        well         = ALL_WELLS[i % 96]
+        result[name] = f"Plate{plate_num}_{well}"
+    return result
 
 
-def build_xml_bytes(calib_pts: np.ndarray, polygons: list, well_map: dict) -> bytes:
+def get_plate_labels(well_map: dict) -> list:
+    """Sorted list of unique plate labels e.g. ['Plate1', 'Plate2']."""
+    return sorted({v.split("_")[0] for v in well_map.values()})
+
+
+def filter_plate_well_map(well_map: dict, plate_label: str) -> dict:
+    """Returns {name: 'A1'} for one plate, stripping the Plate prefix."""
+    prefix = f"{plate_label}_"
+    return {name: w[len(prefix):] for name, w in well_map.items() if w.startswith(prefix)}
+
+
+def _build_single_xml(calib_pts: np.ndarray, polygons: list, pwm: dict) -> bytes:
+    """Build one XML for one plate. pwm: {name: 'A1'}"""
     import xml.etree.ElementTree as ET
 
-    # Build name->well reverse map for TransferID injection
-    well_to_name = {v: k for k, v in well_map.items()}
-
-    col = Collection(calibration_points=calib_pts)
+    well_to_name = {v: k for k, v in pwm.items()}
+    col          = Collection(calibration_points=calib_pts)
     for p in polygons:
         coords = polygon_exterior(p["geom"])
-        col.new_shape(coords, well=well_map.get(p["name"], "A1"), name=p["name"])
+        col.new_shape(coords, well=pwm.get(p["name"], "A1"), name=p["name"])
 
     with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as f:
         tmppath = f.name
     try:
         col.save(tmppath)
-        # Inject <TransferID> after <CapID> for each shape (version-independent)
         tree = ET.parse(tmppath)
         root = tree.getroot()
         for el in root:
@@ -123,8 +139,8 @@ def build_xml_bytes(calib_pts: np.ndarray, polygons: list, well_map: dict) -> by
             sample_name = well_to_name.get(cap_el.text.strip() if cap_el.text else "", "")
             if el.find("TransferID") is None and sample_name:
                 children = list(el)
-                cap_pos = children.index(cap_el)
-                tid = ET.Element("TransferID")
+                cap_pos  = children.index(cap_el)
+                tid      = ET.Element("TransferID")
                 tid.text = sample_name
                 el.insert(cap_pos + 1, tid)
         tree.write(tmppath, encoding="UTF-8", xml_declaration=True)
@@ -134,13 +150,36 @@ def build_xml_bytes(calib_pts: np.ndarray, polygons: list, well_map: dict) -> by
         os.unlink(tmppath)
 
 
+def build_xml_plates(calib_pts: np.ndarray, polygons: list, well_map: dict) -> list:
+    """Returns [(plate_label, xml_bytes), ...] one entry per plate."""
+    results = []
+    for plate_label in get_plate_labels(well_map):
+        pwm         = filter_plate_well_map(well_map, plate_label)
+        plate_polys = [p for p in polygons if p["name"] in pwm]
+        xml_bytes   = _build_single_xml(calib_pts, plate_polys, pwm)
+        results.append((plate_label, xml_bytes))
+    return results
+
+
+def build_xml_zip(plate_xml_list: list, well_map: dict, stem: str) -> bytes:
+    """Zip all plate XMLs + samples_and_wells.json."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for plate_label, xml_bytes in plate_xml_list:
+            z.writestr(f"{stem}_{plate_label}.xml", xml_bytes)
+        z.writestr("samples_and_wells.json",
+                   json.dumps(well_map, indent=2))
+    return buf.getvalue()
+
+
 # ============================================================
 # 96-WELL PLATE PREVIEW
 # ============================================================
 def plot_well_preview(well_map: dict, title: str) -> bytes:
-    groups      = sorted({n.split("_")[0] for n in well_map})
-    palette     = cm.tab20
-    group_color = {g: palette(i / max(len(groups), 1)) for i, g in enumerate(groups)}
+    """well_map: {name: 'A1'} for a single plate."""
+    groups       = sorted({n.split("_")[0] for n in well_map})
+    palette      = cm.tab20
+    group_color  = {g: palette(i / max(len(groups), 1)) for i, g in enumerate(groups)}
     well_to_name = {v: k for k, v in well_map.items()}
 
     fig, ax = plt.subplots(figsize=(12, 6))
@@ -189,7 +228,7 @@ def render_convert_tab():
     st.caption(
         "Converts reclassified GeoJSON to LMD XML using "
         "[py-lmd](https://github.com/MannLabs/py-lmd) (MannLabs, Apache-2.0). "
-        "Select 3 calibration points, then assign wells to annotations."
+        "Select 3 calibration points, then assign wells across one or more 96-well plates."
     )
 
     if not HAS_LMD:
@@ -205,7 +244,7 @@ def render_convert_tab():
         raw  = uploaded.read()
         stem = uploaded.name.replace(".geojson", "").replace(".json", "")
         if st.session_state.get("conv_last") != uploaded.name:
-            st.session_state.t2_xml    = None
+            st.session_state.t2_plates = None
             st.session_state.conv_last = uploaded.name
     elif pipe is not None:
         raw  = pipe
@@ -216,9 +255,12 @@ def render_convert_tab():
 
     points, polygons = parse_geojson(raw)
 
-    c1, c2 = st.columns(2)
+    n_unique = len(set(p["name"] for p in polygons))
+    n_plates = max(1, (n_unique + 95) // 96)
+    c1, c2, c3 = st.columns(3)
     c1.metric("Calibration point candidates", len(points))
     c2.metric("Polygon ROIs", len(polygons))
+    c3.metric("Plates needed", n_plates)
 
     if not polygons:
         st.error("No polygon features found in GeoJSON.")
@@ -229,10 +271,6 @@ def render_convert_tab():
     if dup_names:
         st.warning(f"Duplicate annotation names: {sorted(set(dup_names))}. "
                    "Only the first occurrence of each name gets a unique well.")
-
-    if len(polygons) > 96:
-        st.warning(f"{len(polygons)} ROIs — only the first 96 will be assigned wells.")
-        polygons = polygons[:96]
 
     st.divider()
 
@@ -299,42 +337,60 @@ def render_convert_tab():
     if randomize:
         seed = int(st.number_input("Random seed", value=42, step=1, key="rand_seed"))
 
-    well_map = assign_wells(polygons, randomize=randomize, seed=seed)
+    well_map     = assign_wells(polygons, randomize=randomize, seed=seed)
+    plate_labels = get_plate_labels(well_map)
 
-    col_tbl, col_plate = st.columns([1, 2])
-    with col_tbl:
-        with st.expander("Table", expanded=False):
-            st.dataframe(
-                [{"Annotation": k, "Well": v} for k, v in sorted(well_map.items())],
-                use_container_width=True, hide_index=True
-            )
-    with col_plate:
-        preview_png = plot_well_preview(well_map, "Well assignment preview")
-        st.image(preview_png, use_container_width=True)
+    # Show all plates in tabs
+    plate_tabs = st.tabs(plate_labels)
+    for tab, pl in zip(plate_tabs, plate_labels):
+        with tab:
+            pwm        = filter_plate_well_map(well_map, pl)
+            n_in_plate = len(pwm)
+            st.caption(f"{pl}: {n_in_plate} ROIs")
+            col_tbl, col_plate = st.columns([1, 2])
+            with col_tbl:
+                with st.expander("Table", expanded=False):
+                    st.dataframe(
+                        [{"Annotation": k, "Well": v} for k, v in sorted(pwm.items())],
+                        use_container_width=True, hide_index=True
+                    )
+            with col_plate:
+                preview_png = plot_well_preview(pwm, f"{pl} — {n_in_plate} ROIs")
+                st.image(preview_png, use_container_width=True)
 
     st.divider()
 
     if st.button("Convert to XML", type="primary", disabled=not calib_ok):
-        with st.spinner("Building LMD collection..."):
-            xml_bytes = build_xml_bytes(calib_pts, polygons, well_map)
+        with st.spinner(f"Building {len(plate_labels)} plate(s)..."):
+            plate_xml_list = build_xml_plates(calib_pts, polygons, well_map)
+            zip_bytes      = build_xml_zip(plate_xml_list, well_map, stem)
 
-        st.session_state.t2_xml  = xml_bytes
-        st.session_state.t2_saw  = well_map
-        st.session_state.t2_stem = stem
-        st.success(f"Converted {len(polygons)} ROIs.")
+        st.session_state.t2_plates = plate_xml_list
+        st.session_state.t2_saw    = well_map
+        st.session_state.t2_stem   = stem
+        st.session_state.t2_zip    = zip_bytes
+        st.success(f"Converted {len(polygons)} ROIs across {len(plate_labels)} plate(s).")
 
-    if st.session_state.get("t2_xml"):
-        stem_out  = st.session_state.get("t2_stem") or stem
-        xml_bytes = st.session_state.t2_xml
-        saw_bytes = json.dumps(st.session_state.t2_saw, indent=2).encode("utf-8")
+    if st.session_state.get("t2_plates"):
+        stem_out      = st.session_state.get("t2_stem") or stem
+        zip_bytes_dl  = st.session_state.t2_zip
+        saw_bytes     = json.dumps(st.session_state.t2_saw, indent=2).encode("utf-8")
+        plates_out    = st.session_state.t2_plates
 
-        dl1, dl2 = st.columns(2)
-        dl1.download_button(
-            f"Download {stem_out}.xml", xml_bytes,
-            file_name=f"{stem_out}.xml", mime="application/xml", type="primary"
+        # Download buttons: zip + individual plates + JSON
+        n_btns   = len(plates_out) + 2
+        dl_cols  = st.columns(n_btns)
+        dl_cols[0].download_button(
+            "All plates (zip)", zip_bytes_dl,
+            file_name=f"{stem_out}_lmd.zip", mime="application/zip", type="primary"
         )
-        dl2.download_button(
-            "Download samples_and_wells.json", saw_bytes,
+        for i, (plate_label, xml_bytes) in enumerate(plates_out):
+            dl_cols[i + 1].download_button(
+                f"{plate_label}.xml", xml_bytes,
+                file_name=f"{stem_out}_{plate_label}.xml", mime="application/xml"
+            )
+        dl_cols[-1].download_button(
+            "samples_and_wells.json", saw_bytes,
             file_name=f"{stem_out}_samples_and_wells.json", mime="application/json"
         )
         st.caption("Outputs piped to Tab 3 (Process) without re-uploading.")

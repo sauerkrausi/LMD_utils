@@ -250,11 +250,12 @@ class ControlAllocator:
 # ============================================================
 # QUEUE BUILDER
 # ============================================================
-def build_queue_core(csv_bytes: bytes, group_assignments: dict, p: dict) -> dict:
-    """
-    group_assignments: {roi_name: group_label}
-    Controls overflow dynamically into Slot3, Slot4 as needed.
-    """
+def _build_plate_queue(rows_for_plate, group_assignments, p,
+                       sample_slot, ctrl_start_slot,
+                       counts, alloc):
+    """Build queue rows for a single sample plate, mutating counts and alloc in place."""
+    use_k562      = p["use_k562"]
+    use_supermix  = p["use_supermix"]
     date          = p["date"]
     initials      = p["initials"]
     lc_short      = p["lc_short"]
@@ -262,28 +263,16 @@ def build_queue_core(csv_bytes: bytes, group_assignments: dict, p: dict) -> dict
     sample_load   = p["sample_load"]
     k562_load     = p.get("k562_load", "")
     supermix_load = p.get("supermix_load", "")
-    use_k562      = p["use_k562"]
-    use_supermix  = p["use_supermix"]
     sep_method    = p["sep_method"]
     inj_method    = p["inj_method"]
     ms_method     = p["ms_method"]
     proc_method   = p["proc_method"]
     sample_path   = p["sample_path"]
     blank_path    = p["blank_path"]
-    stem             = p["stem"]
-    sample_slot      = p.get("sample_slot", "Slot1")
-    ctrl_start_slot  = p.get("ctrl_start_slot", 2)
 
-    text   = csv_bytes.decode("utf-8-sig")
-    reader = csv.DictReader(io.StringIO(text))
-    reader.fieldnames = [h.strip() for h in reader.fieldnames]
-    all_rows = list(reader)
+    samples = [r for r in rows_for_plate
+               if r.get("Dropout {Y/N}", "").strip().upper() != "Y"]
 
-    dropout_wells = {r["Well_ID"].strip() for r in all_rows
-                     if r.get("Dropout {Y/N}", "").strip().upper() == "Y"}
-    samples = [r for r in all_rows if r.get("Dropout {Y/N}", "").strip().upper() != "Y"]
-
-    # Build groups preserving CSV order
     groups_seen, group_map = [], {}
     for row in samples:
         roi = row["ROI"].strip()
@@ -293,29 +282,28 @@ def build_queue_core(csv_bytes: bytes, group_assignments: dict, p: dict) -> dict
             groups_seen.append(grp)
         group_map[grp].append(row)
 
-    # Pre-count controls to set row-band offsets
     ctrl_counts = count_controls(groups_seen, group_map, use_k562, use_supermix)
-    alloc       = ControlAllocator(ctrl_counts, use_k562, use_supermix, start_slot=ctrl_start_slot)
-    counts      = {"K562": 0, "Supermix": 0, "Blank": 0}
-    queue       = []
+    alloc_pl    = ControlAllocator(ctrl_counts, use_k562, use_supermix,
+                                   start_slot=ctrl_start_slot)
+    queue_pl    = []
 
     def add_k562():
         counts["K562"] += 1
         sid  = f"{date}_{initials}_{lc_short}_{ms_short}_{k562_load}_K562_{counts['K562']}"
-        vial = alloc.add("K562", sid)
-        queue.append(make_row(vial, sid, sample_path, sep_method, inj_method, ms_method, proc_method))
+        vial = alloc_pl.add("K562", sid)
+        queue_pl.append(make_row(vial, sid, sample_path, sep_method, inj_method, ms_method, proc_method))
 
     def add_supermix():
         counts["Supermix"] += 1
         sid  = f"{date}_{initials}_{lc_short}_{ms_short}_{supermix_load}_Supermix_{counts['Supermix']}"
-        vial = alloc.add("Supermix", sid)
-        queue.append(make_row(vial, sid, sample_path, sep_method, inj_method, ms_method, proc_method))
+        vial = alloc_pl.add("Supermix", sid)
+        queue_pl.append(make_row(vial, sid, sample_path, sep_method, inj_method, ms_method, proc_method))
 
     def add_blank():
         counts["Blank"] += 1
         sid  = f"{date}_{initials}_{lc_short}_{ms_short}_Blank_{counts['Blank']}"
-        vial = alloc.add("Blank", sid)
-        queue.append(make_row(vial, sid, blank_path, sep_method, inj_method, ms_method, proc_method))
+        vial = alloc_pl.add("Blank", sid)
+        queue_pl.append(make_row(vial, sid, blank_path, sep_method, inj_method, ms_method, proc_method))
 
     for grp in groups_seen:
         if use_k562:     add_k562()
@@ -326,27 +314,105 @@ def build_queue_core(csv_bytes: bytes, group_assignments: dict, p: dict) -> dict
                 roi      = row["ROI"].strip()
                 well_pos = well_to_slot1(row["Well_ID"].strip()).replace("Slot1", sample_slot)
                 sid      = f"{date}_{initials}_{lc_short}_{ms_short}_{sample_load}_{roi}"
-                queue.append(make_row(well_pos, sid, sample_path,
-                                      sep_method, inj_method, ms_method, proc_method))
+                queue_pl.append(make_row(well_pos, sid, sample_path,
+                                         sep_method, inj_method, ms_method, proc_method))
             add_blank()
 
-    # Spares (pre-counted — added to ctrl slots, not in queue)
-    k562_spares     = ctrl_counts["k562_spares"]
-    supermix_spares = ctrl_counts["supermix_spares"]
-    blank_spares    = ctrl_counts["blank_spares"]
+    # Spares (not in queue, just placed in ctrl plate)
+    k562_sp = ctrl_counts["k562_spares"]
+    smix_sp = ctrl_counts["supermix_spares"]
+    blnk_sp = ctrl_counts["blank_spares"]
+    for i in range(1, k562_sp + 1):
+        n = counts["K562"] + i
+        alloc_pl.add("K562",
+            f"{date}_{initials}_{lc_short}_{ms_short}_{k562_load}_K562_{n}_spare",
+            in_queue=False)
+    for i in range(1, smix_sp + 1):
+        n = counts["Supermix"] + i
+        alloc_pl.add("Supermix",
+            f"{date}_{initials}_{lc_short}_{ms_short}_{supermix_load}_Supermix_{n}_spare",
+            in_queue=False)
+    for i in range(1, blnk_sp + 1):
+        n = counts["Blank"] + i
+        alloc_pl.add("Blank",
+            f"{date}_{initials}_{lc_short}_{ms_short}_Blank_{n}_spare",
+            in_queue=False)
 
-    for i in range(1, k562_spares + 1):
-        n   = counts["K562"] + i
-        sid = f"{date}_{initials}_{lc_short}_{ms_short}_{k562_load}_K562_{n}_spare"
-        alloc.add("K562", sid, in_queue=False)
-    for i in range(1, supermix_spares + 1):
-        n   = counts["Supermix"] + i
-        sid = f"{date}_{initials}_{lc_short}_{ms_short}_{supermix_load}_Supermix_{n}_spare"
-        alloc.add("Supermix", sid, in_queue=False)
-    for i in range(1, blank_spares + 1):
-        n   = counts["Blank"] + i
-        sid = f"{date}_{initials}_{lc_short}_{ms_short}_Blank_{n}_spare"
-        alloc.add("Blank", sid, in_queue=False)
+    alloc.entries.extend(alloc_pl.entries)
+
+    return {
+        "queue_rows":    queue_pl,
+        "groups_seen":   groups_seen,
+        "samples":       samples,
+        "ctrl_counts":   ctrl_counts,
+        "alloc":         alloc_pl,
+        "sample_slot":   sample_slot,
+        "k562_spares":   k562_sp,
+        "supermix_spares": smix_sp,
+        "blank_spares":  blnk_sp,
+    }
+
+
+def build_queue_core(csv_bytes: bytes, group_assignments: dict, p: dict) -> dict:
+    """
+    group_assignments: {roi_name: group_label}
+    plate_slot_map in p: {plate_label: {"sample_slot": "Slot1", "ctrl_start_slot": 2}}
+    If CSV has no Plate column, treated as single plate.
+    """
+    date          = p["date"]
+    initials      = p["initials"]
+    lc_short      = p["lc_short"]
+    ms_short      = p["ms_short"]
+    use_k562      = p["use_k562"]
+    use_supermix  = p["use_supermix"]
+    stem          = p["stem"]
+    plate_slot_map = p.get("plate_slot_map", {})
+    # fallback globals (used when no plate_slot_map entry exists)
+    default_sample_slot   = p.get("sample_slot", "Slot1")
+    default_ctrl_start    = p.get("ctrl_start_slot", 2)
+
+    text   = csv_bytes.decode("utf-8-sig")
+    reader = csv.DictReader(io.StringIO(text))
+    reader.fieldnames = [h.strip() for h in reader.fieldnames]
+    all_rows  = list(reader)
+    has_plate = "Plate" in (reader.fieldnames or [])
+
+    # Split rows by plate
+    plate_rows = {}
+    for row in all_rows:
+        pl = row.get("Plate", "Plate1").strip() if has_plate else "Plate1"
+        plate_rows.setdefault(pl, []).append(row)
+    plate_order = sorted(plate_rows.keys())
+
+    # If no plate_slot_map provided, auto-assign: Plate1->Slot1+Slot2, Plate2->Slot3+Slot4
+    if not plate_slot_map:
+        for i, pl in enumerate(plate_order):
+            plate_slot_map[pl] = {
+                "sample_slot":    f"Slot{i * 2 + 1}",
+                "ctrl_start_slot": i * 2 + 2,
+            }
+
+    # Process plates
+    all_queue       = []
+    all_groups_seen = []
+    counts          = {"K562": 0, "Supermix": 0, "Blank": 0}
+    combined_alloc  = ControlAllocator.__new__(ControlAllocator)
+    combined_alloc.entries = []
+
+    plate_results  = {}
+    for pl in plate_order:
+        slot_info = plate_slot_map.get(pl, {
+            "sample_slot":    default_sample_slot,
+            "ctrl_start_slot": default_ctrl_start,
+        })
+        pr = _build_plate_queue(
+            plate_rows[pl], group_assignments, p,
+            slot_info["sample_slot"], slot_info["ctrl_start_slot"],
+            counts, combined_alloc,
+        )
+        plate_results[pl] = pr
+        all_queue.extend(pr["queue_rows"])
+        all_groups_seen.extend(pr["groups_seen"])
 
     # Queue XLSX
     try:
@@ -354,7 +420,7 @@ def build_queue_core(csv_bytes: bytes, group_assignments: dict, p: dict) -> dict
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.append(QUEUE_COLS)
-        for row in queue:
+        for row in all_queue:
             ws.append([row.get(col, "") for col in QUEUE_COLS])
         xlsx_buf = io.BytesIO()
         wb.save(xlsx_buf)
@@ -362,59 +428,78 @@ def build_queue_core(csv_bytes: bytes, group_assignments: dict, p: dict) -> dict
     except ImportError:
         queue_xlsx = None
 
-    # Slot1 - samples
-    slot1_grid    = {r: {c: "" for c in COLS} for r in ROWS}
-    well_to_group = {}
-    for row in all_rows:
-        w_id = row["Well_ID"].strip()
-        if w_id:
-            roi = row["ROI"].strip()
-            slot1_grid[w_id[0]][int(w_id[1:])] = roi
-            well_to_group[roi] = group_assignments.get(roi, suggest_group(roi))
+    # Per-plate sample slot grids + PNGs
+    sample_slot_outputs = {}   # {sample_slot_label: {grid, png, csv}}
+    for pl in plate_order:
+        pr        = plate_results[pl]
+        sslot     = pr["sample_slot"]
+        rows_pl   = plate_rows[pl]
+        dropout_w = {r["Well_ID"].strip() for r in rows_pl
+                     if r.get("Dropout {Y/N}", "").strip().upper() == "Y"}
+        grid = {r: {c: "" for c in COLS} for r in ROWS}
+        well_to_group = {}
+        for row in rows_pl:
+            w_id = row["Well_ID"].strip()
+            if w_id:
+                roi = row["ROI"].strip()
+                grid[w_id[0]][int(w_id[1:])] = roi
+                well_to_group[roi] = group_assignments.get(roi, suggest_group(roi))
 
-    n_g = max(len(groups_seen), 1)
-    group_colors = {}
-    for i, g in enumerate(groups_seen):
-        idx = round(i / n_g * 20)
-        group_colors[g] = GREY_REPLACEMENTS.get(idx, cm.tab20(i / n_g))
+        groups_pl = pr["groups_seen"]
+        n_g       = max(len(groups_pl), 1)
+        group_colors = {}
+        for i, g in enumerate(groups_pl):
+            idx = round(i / n_g * 20)
+            group_colors[g] = GREY_REPLACEMENTS.get(idx, cm.tab20(i / n_g))
 
-    slot1_color_map   = {}
-    slot1_label_color = {}
-    for r in ROWS:
-        for c in COLS:
-            roi = slot1_grid[r][c]
-            if roi:
-                grp    = well_to_group.get(roi, "")
-                wid    = f"{r}{c}"
-                if wid in dropout_wells:
-                    slot1_color_map[roi]   = "#dddddd"
-                    slot1_label_color[roi] = "red"
-                else:
-                    slot1_color_map[roi]   = group_colors.get(grp, "white")
-                    slot1_label_color[roi] = "black"
+        color_map  = {}
+        label_color = {}
+        for r in ROWS:
+            for c in COLS:
+                roi = grid[r][c]
+                if roi:
+                    grp = well_to_group.get(roi, "")
+                    if f"{r}{c}" in dropout_w:
+                        color_map[roi]   = "#dddddd"
+                        label_color[roi] = "red"
+                    else:
+                        color_map[roi]   = group_colors.get(grp, "white")
+                        label_color[roi] = "black"
 
-    roi_to_group = {roi: well_to_group.get(roi, roi) for roi in slot1_color_map}
-    slot1_png    = plot_plate(slot1_grid, slot1_color_map, f"{sample_slot} - Samples ({stem})",
-                              legend_group_map=roi_to_group,
-                              label_color_map=slot1_label_color)
+        roi_to_group = {roi: well_to_group.get(roi, roi) for roi in color_map}
+        png = plot_plate(grid, color_map, f"{sslot} - {pl} Samples ({stem})",
+                         legend_group_map=roi_to_group, label_color_map=label_color)
+        buf = io.StringIO()
+        wtr = csv.writer(buf)
+        wtr.writerow([""] + COLS)
+        for r in ROWS:
+            wtr.writerow([r] + [grid[r][c] for c in COLS])
+        key = f"{sslot}_{pl}"
+        sample_slot_outputs[key] = {
+            "grid": grid, "png": png,
+            "csv":  buf.getvalue().encode("utf-8"),
+            "sample_slot": sslot, "plate": pl,
+        }
 
-    slot1_buf = io.StringIO()
-    wtr = csv.writer(slot1_buf)
-    wtr.writerow([""] + COLS)
-    for r in ROWS:
-        wtr.writerow([r] + [slot1_grid[r][c] for c in COLS])
-
-    # Control slots
+    # Control slot grids + PNGs (combined from all plates)
     ctrl_color_map = {}
     ctrl_label_map = {}
-    for _, _, ctype, sid, in_queue in alloc.entries:
+    for _, _, ctype, sid, in_queue in combined_alloc.entries:
         ctrl_color_map[sid] = (CTRL_COLORS if in_queue else CTRL_COLORS_SPARE).get(ctype, "white")
         num = sid.split("_")[-1]
         ctrl_label_map[sid] = f"{ctype}\n{num}"
-    sid_to_type = {sid: ctype for _, _, ctype, sid, _ in alloc.entries}
+    sid_to_type = {sid: ctype for _, _, ctype, sid, _ in combined_alloc.entries}
+
+    # Rebuild plates dict from combined_alloc
+    ctrl_grids = {}
+    for slot, pos, ctype, sid, _ in combined_alloc.entries:
+        if slot not in ctrl_grids:
+            ctrl_grids[slot] = {r: {c: "" for c in COLS} for r in ROWS}
+        r, c = index_to_well(pos)
+        ctrl_grids[slot][r][c] = sid
 
     ctrl_slot_outputs = {}
-    for slot_num, grid in alloc.plates().items():
+    for slot_num, grid in ctrl_grids.items():
         png = plot_plate(grid, ctrl_color_map, f"Slot{slot_num} - Controls ({stem})",
                          label_map=ctrl_label_map, legend_group_map=sid_to_type)
         buf = io.StringIO()
@@ -424,19 +509,23 @@ def build_queue_core(csv_bytes: bytes, group_assignments: dict, p: dict) -> dict
             wtr.writerow([r] + [grid[r][c] for c in COLS])
         ctrl_slot_outputs[slot_num] = {"png": png, "csv": buf.getvalue().encode("utf-8")}
 
+    total_k562_sp = sum(pr["k562_spares"]     for pr in plate_results.values())
+    total_smix_sp = sum(pr["supermix_spares"] for pr in plate_results.values())
+    total_blnk_sp = sum(pr["blank_spares"]    for pr in plate_results.values())
+
     return {
-        "queue_xlsx":      queue_xlsx,
-        "slot1_csv":       slot1_buf.getvalue().encode("utf-8"),
-        "slot1_png":       slot1_png,
-        "ctrl_slots":      ctrl_slot_outputs,
-        "n_queue":         len(queue),
-        "counts":          counts,
-        "k562_spares":     k562_spares,
-        "supermix_spares": supermix_spares,
-        "blank_spares":    blank_spares,
-        "stem":            stem,
-        "groups":          groups_seen,
-        "sample_slot":     sample_slot,
+        "queue_xlsx":         queue_xlsx,
+        "sample_slot_outputs": sample_slot_outputs,
+        "ctrl_slots":         ctrl_slot_outputs,
+        "n_queue":            len(all_queue),
+        "counts":             counts,
+        "k562_spares":        total_k562_sp,
+        "supermix_spares":    total_smix_sp,
+        "blank_spares":       total_blnk_sp,
+        "stem":               stem,
+        "groups":             all_groups_seen,
+        "plate_order":        plate_order,
+        "plate_slot_map":     plate_slot_map,
     }
 
 
@@ -446,8 +535,9 @@ def build_zip(res: dict) -> bytes:
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         if res["queue_xlsx"]:
             z.writestr(f"{stem}_queue.xlsx", res["queue_xlsx"])
-        z.writestr(f"{stem}_slot1.csv", res["slot1_csv"])
-        z.writestr(f"{stem}_slot1.png", res["slot1_png"])
+        for key, data in res["sample_slot_outputs"].items():
+            z.writestr(f"{stem}_{key}_samples.csv", data["csv"])
+            z.writestr(f"{stem}_{key}_samples.png", data["png"])
         for slot_num, data in res["ctrl_slots"].items():
             z.writestr(f"{stem}_slot{slot_num}.csv", data["csv"])
             z.writestr(f"{stem}_slot{slot_num}.png", data["png"])
@@ -486,10 +576,8 @@ def render_ms_queue_tab():
     use_supermix  = c7.checkbox("Supermix",         value=True,   key="msq_smix")
     supermix_load = c8.text_input("Supermix load",  value="20ng", key="msq_smixl") if use_supermix else ""
 
-    SLOT_OPTIONS = [f"Slot{i}" for i in range(1, 7)]
-    cs1, cs2 = st.columns(2)
-    sample_slot    = cs1.selectbox("Sample plate slot",   SLOT_OPTIONS, index=0, key="msq_sample_slot")
-    ctrl_slot_base = cs2.selectbox("Controls start slot", SLOT_OPTIONS, index=1, key="msq_ctrl_slot")
+    # Slot assignment — configured per plate after CSV is loaded (see below)
+    SLOT_OPTIONS = [f"Slot{i}" for i in range(1, 13)]
 
     with st.expander("Instrument method paths", expanded=False):
         default_sep              = LC_METHODS.get(lc_short, "")
@@ -514,6 +602,7 @@ def render_ms_queue_tab():
 
     # Source
     pipe_csv  = st.session_state.get("t3_sample_list")
+    SLOT_OPTIONS = [f"Slot{i}" for i in range(1, 13)]
     pipe_stem = st.session_state.get("t3_stem")
     uploaded  = st.file_uploader("Upload sample list CSV", type=["csv"], key="msq_upload")
 
@@ -550,6 +639,50 @@ def render_ms_queue_tab():
     if not samples:
         st.error("No active samples in CSV (all marked as dropouts).")
         return
+
+    # Detect plates from CSV
+    has_plate_col = "Plate" in (reader.fieldnames or [])
+    plate_order   = sorted({r.get("Plate", "Plate1").strip()
+                             for r in all_rows}) if has_plate_col else ["Plate1"]
+
+    # Per-plate slot assignment
+    st.divider()
+    st.subheader("Plate Slot Assignment")
+    st.caption("Auto-assigned consecutively (Plate1: Slot1+Slot2, Plate2: Slot3+Slot4, ...). Edit to override.")
+
+    saved_slot_map = st.session_state.get("msq_plate_slot_map") or {}
+    slot_data = []
+    for i, pl in enumerate(plate_order):
+        saved = saved_slot_map.get(pl, {})
+        slot_data.append({
+            "Plate":              pl,
+            "Sample slot":        saved.get("sample_slot",    f"Slot{i * 2 + 1}"),
+            "Controls start slot": saved.get("ctrl_start_slot_str", f"Slot{i * 2 + 2}"),
+        })
+
+    slot_df = pd.DataFrame(slot_data)
+    edited_slots = st.data_editor(
+        slot_df,
+        column_config={
+            "Plate":              st.column_config.TextColumn("Plate", disabled=True),
+            "Sample slot":        st.column_config.SelectboxColumn("Sample slot",    options=SLOT_OPTIONS),
+            "Controls start slot": st.column_config.SelectboxColumn("Controls start slot", options=SLOT_OPTIONS),
+        },
+        hide_index=True,
+        use_container_width=True,
+        key="msq_slot_editor",
+    )
+
+    # Build plate_slot_map from editor
+    plate_slot_map = {}
+    for _, row in edited_slots.iterrows():
+        pl = row["Plate"]
+        plate_slot_map[pl] = {
+            "sample_slot":     row["Sample slot"],
+            "ctrl_start_slot": int(row["Controls start slot"].replace("Slot", "")),
+            "ctrl_start_slot_str": row["Controls start slot"],
+        }
+    st.session_state.msq_plate_slot_map = plate_slot_map
 
     st.divider()
     st.subheader("Run Grouping")
@@ -616,8 +749,7 @@ def render_ms_queue_tab():
             ms_method=ms_method, proc_method=proc_method,
             sample_path=sample_path, blank_path=blank_path,
             stem=stem,
-            sample_slot=sample_slot,
-            ctrl_start_slot=int(ctrl_slot_base.replace("Slot", "")),
+            plate_slot_map=plate_slot_map,
         )
         with st.spinner("Generating..."):
             res = build_queue_core(csv_bytes, group_assignments, params)
@@ -638,11 +770,12 @@ def render_ms_queue_tab():
         f"Control slots used: {n_cslots}"
     )
 
-    # Plate maps — Slot1 + ctrl slots side by side (max 3 per row)
-    all_plate_items = [(f"{res.get('sample_slot','Slot1')} - Samples", res["slot1_png"])] + [
-        (f"Slot{sn} - Controls", data["png"])
-        for sn, data in res["ctrl_slots"].items()
-    ]
+    # Plate maps — sample slots + ctrl slots, 2 per row
+    all_plate_items = []
+    for key, data in res["sample_slot_outputs"].items():
+        all_plate_items.append((f"{data['sample_slot']} - {data['plate']} Samples", data["png"]))
+    for sn, data in res["ctrl_slots"].items():
+        all_plate_items.append((f"Slot{sn} - Controls", data["png"]))
     for i in range(0, len(all_plate_items), 2):
         chunk = all_plate_items[i:i + 2]
         cols  = st.columns(len(chunk))
@@ -660,17 +793,15 @@ def render_ms_queue_tab():
             if st.session_state.get("t1_geojson") and st.session_state.get("t1_stem"):
                 z.writestr(f"{st.session_state.t1_stem}_reclassified.geojson",
                            st.session_state.t1_geojson)
-            if st.session_state.get("t2_xml") and st.session_state.get("t2_stem"):
-                z.writestr(f"{st.session_state.t2_stem}.xml", st.session_state.t2_xml)
-            if st.session_state.get("t2_saw"):
-                z.writestr("samples_and_wells.json",
-                           json.dumps(st.session_state.t2_saw, indent=2).encode("utf-8"))
-            if st.session_state.get("proc_result"):
-                r3 = st.session_state.proc_result
-                s3 = r3["stem"]
-                z.writestr(f"{s3}_sorted.xml",      r3["sorted_xml"])
-                z.writestr(f"{s3}_96wellplate.csv", r3["wellplate_csv"])
-                z.writestr(f"{s3}_platemap.png",    st.session_state.proc_png)
+            if st.session_state.get("t2_zip") and st.session_state.get("t2_stem"):
+                # Unpack Tab 2 zip into all_steps zip
+                with zipfile.ZipFile(io.BytesIO(st.session_state.t2_zip)) as t2z:
+                    for name in t2z.namelist():
+                        z.writestr(name, t2z.read(name))
+            if st.session_state.get("proc_zip"):
+                with zipfile.ZipFile(io.BytesIO(st.session_state.proc_zip)) as p3z:
+                    for name in p3z.namelist():
+                        z.writestr(name, p3z.read(name))
             if st.session_state.get("t3_sample_list"):
                 z.writestr(f"{stem_out}_sample_list.csv", st.session_state.t3_sample_list)
             with zipfile.ZipFile(io.BytesIO(msq_zip_bytes)) as msq_z:
@@ -696,8 +827,9 @@ def render_ms_queue_tab():
         dl_items.append(("Queue XLSX", res["queue_xlsx"],
                          f"{stem_out}_queue.xlsx",
                          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
-    dl_items.append(("Slot1 CSV", res["slot1_csv"], f"{stem_out}_slot1.csv", "text/csv"))
-    dl_items.append(("Slot1 PNG", res["slot1_png"], f"{stem_out}_slot1.png", "image/png"))
+    for key, data in res["sample_slot_outputs"].items():
+        dl_items.append((f"{key} CSV", data["csv"], f"{stem_out}_{key}_samples.csv", "text/csv"))
+        dl_items.append((f"{key} PNG", data["png"], f"{stem_out}_{key}_samples.png", "image/png"))
     for sn, data in res["ctrl_slots"].items():
         dl_items.append((f"Slot{sn} CSV", data["csv"], f"{stem_out}_slot{sn}.csv", "text/csv"))
         dl_items.append((f"Slot{sn} PNG", data["png"], f"{stem_out}_slot{sn}.png", "image/png"))
