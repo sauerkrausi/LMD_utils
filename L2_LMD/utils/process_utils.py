@@ -306,8 +306,12 @@ def render_process_tab():
 
     # Source: piped from Tab 2 or zip upload
     t2_plates = st.session_state.get("t2_plates")   # [(plate_label, xml_bytes)]
-    t2_saw    = st.session_state.get("t2_saw")       # {name: "Plate1_A1"}
+    t2_saw    = st.session_state.get("t2_saw")       # {name: "Plate1_A1"} or {name: "A1"}
     t2_stem   = st.session_state.get("t2_stem")
+
+    # Backward compat: old Tab 2 set t2_xml (single bytes) instead of t2_plates
+    if t2_plates is None and st.session_state.get("t2_xml") is not None:
+        t2_plates = [("Plate1", st.session_state.t2_xml)]
 
     source = None
     uploaded_zip = st.file_uploader(
