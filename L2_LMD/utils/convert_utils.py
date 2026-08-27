@@ -90,15 +90,21 @@ def count_inside_triangle(calib_pts: np.ndarray, polygons: list):
     )
 
 
-def assign_wells(polygons: list, randomize: bool = False, seed: int = 42) -> dict:
-    """Returns {name: 'Plate1_A1'} across as many 96-well plates as needed."""
+def assign_wells(polygons: list, randomize: bool = False, seed: int = 42,
+                 balance: bool = False) -> dict:
+    """Returns {name: 'Plate1_A1'} across as many 96-well plates as needed.
+    balance=True distributes samples evenly (e.g. 67/67/67 instead of 96/96/9)."""
+    import math
     names = sorted(set(p["name"] for p in polygons))
     if randomize:
         random.Random(seed).shuffle(names)
+    n = len(names)
+    n_plates   = max(1, math.ceil(n / 96))
+    plate_size = math.ceil(n / n_plates) if balance else 96
     result = {}
     for i, name in enumerate(names):
-        plate_num    = i // 96 + 1
-        well         = ALL_WELLS[i % 96]
+        plate_num    = i // plate_size + 1
+        well         = ALL_WELLS[i % plate_size]
         result[name] = f"Plate{plate_num}_{well}"
     return result
 
@@ -332,12 +338,18 @@ def render_convert_tab():
 
     # Well assignment
     st.subheader("Well Assignment")
-    randomize = st.checkbox("Randomize well order", value=False)
-    seed      = 42
+    opt_cols  = st.columns(2)
+    randomize = opt_cols[0].checkbox("Randomize well order", value=False)
+    balance   = opt_cols[1].checkbox(
+        "Balance samples across plates",
+        value=True,
+        help="Distribute samples evenly (e.g. 67/67/67 instead of 96/96/9)"
+    )
+    seed = 42
     if randomize:
         seed = int(st.number_input("Random seed", value=42, step=1, key="rand_seed"))
 
-    well_map     = assign_wells(polygons, randomize=randomize, seed=seed)
+    well_map     = assign_wells(polygons, randomize=randomize, seed=seed, balance=balance)
     plate_labels = get_plate_labels(well_map)
 
     # Show all plates in tabs
