@@ -692,13 +692,25 @@ def render_ms_queue_tab():
         "then a Blank after every 6 samples."
     )
 
+    # Read Group column from CSV if present (piped from Tab 2/3)
+    has_group_col = "Group" in (reader.fieldnames or [])
+    csv_group_map = {}
+    if has_group_col:
+        for r in all_rows:
+            roi = r.get("ROI", "").strip()
+            grp = r.get("Group", "").strip()
+            if roi and grp:
+                csv_group_map[roi] = grp
+
     confirmed_assignments = st.session_state.msq_group_assignments or {}
 
     init_data = [
         {
             "ROI":   r["ROI"].strip(),
             "Well":  r.get("Well_ID", "").strip(),
-            "Group": confirmed_assignments.get(r["ROI"].strip(), suggest_group(r["ROI"].strip())),
+            "Group": (confirmed_assignments.get(r["ROI"].strip())
+                      or csv_group_map.get(r["ROI"].strip())
+                      or suggest_group(r["ROI"].strip())),
         }
         for r in samples
     ]
