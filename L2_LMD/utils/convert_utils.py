@@ -27,6 +27,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.cm as cm
 import numpy as np
+import pandas as pd
 import streamlit as st
 
 try:
@@ -91,10 +92,11 @@ def count_inside_triangle(calib_pts: np.ndarray, polygons: list):
 
 
 def assign_wells(polygons: list, randomize: bool = False, seed: int = 42,
-                 balance: bool = False) -> dict:
+                 balance: bool = False, groups_dict: dict = None) -> dict:
     """Returns {name: 'Plate1_A1'} across as many 96-well plates as needed.
     balance=True: group-aware bin-packing keeps sample groups on the same plate
-    while spreading load as evenly as possible."""
+    while spreading load as evenly as possible.
+    groups_dict: {roi_name: group_label} — if None, falls back to name prefix."""
     import math
     from collections import defaultdict
 
@@ -111,10 +113,10 @@ def assign_wells(polygons: list, randomize: bool = False, seed: int = 42,
             result[name] = f"Plate{i // 96 + 1}_{ALL_WELLS[i % 96]}"
         return result
 
-    # Group-aware bin-packing: group = everything before first '_'
+    # Group-aware bin-packing: use explicit groups_dict or fall back to name prefix
     groups = defaultdict(list)
     for name in names:
-        grp = name.split("_")[0]
+        grp = (groups_dict or {}).get(name, name.split("_")[0])
         groups[grp].append(name)
 
     group_list = sorted(groups.items(), key=lambda x: -len(x[1]))   # largest first (LPT)
@@ -278,8 +280,9 @@ def render_convert_tab():
         raw  = uploaded.read()
         stem = uploaded.name.replace(".geojson", "").replace(".json", "")
         if st.session_state.get("conv_last") != uploaded.name:
-            st.session_state.t2_plates = None
-            st.session_state.conv_last = uploaded.name
+            st.session_state.t2_plates       = None
+            st.session_state.t2_prefixes     = None   # triggers group editor reset
+            st.session_state.conv_last       = uploaded.name
     elif pipe is not None:
         raw  = pipe
         stem = st.session_state.get("t1_stem", "geojson")
@@ -364,6 +367,66 @@ def render_convert_tab():
 
     st.divider()
 
+    # Sample Groups
+    st.subheader("Sample Groups")
+    st.caption(
+        "Auto-detected from name prefixes. Edit **Group** to reassign. "
+        "Groups stay together on the same plate and are piped to Tab 4 for MS queue batching."
+    )
+
+    prefixes = sorted({p["name"].split("_")[0] for p in polygons})
+    n_pfx    = len(prefixes)
+
+    # Reset group state when prefix list changes (new file)
+    if st.session_state.get("t2_prefixes") != prefixes:
+        st.session_state.t2_prefixes     = prefixes
+        st.session_state.t2_n_groups     = n_pfx
+        st.session_state.t2_prefix_group = {pfx: f"Group{i+1}" for i, pfx in enumerate(prefixes)}
+
+    n_groups      = max(st.session_state.get("t2_n_groups", n_pfx), n_pfx)
+    group_options = [f"Group{i+1}" for i in range(n_groups)]
+    prefix_group  = st.session_state.get("t2_prefix_group", {})
+
+    roi_count = {}
+    for p in polygons:
+        pfx = p["name"].split("_")[0]
+        roi_count[pfx] = roi_count.get(pfx, 0) + 1
+
+    init_rows = []
+    for pfx in prefixes:
+        grp = prefix_group.get(pfx, group_options[0])
+        if grp not in group_options:
+            grp = group_options[0]
+        init_rows.append({"Prefix": pfx, "# ROIs": roi_count.get(pfx, 0), "Group": grp})
+
+    edited_pg = st.data_editor(
+        pd.DataFrame(init_rows),
+        column_config={
+            "Prefix": st.column_config.TextColumn("Prefix", disabled=True),
+            "# ROIs": st.column_config.NumberColumn("# ROIs", disabled=True),
+            "Group":  st.column_config.SelectboxColumn("Group", options=group_options),
+        },
+        hide_index=True,
+        use_container_width=True,
+        key="t2_group_editor",
+    )
+
+    if st.button("+ Add Group", key="t2_add_group"):
+        st.session_state.t2_prefix_group = dict(zip(edited_pg["Prefix"], edited_pg["Group"]))
+        st.session_state.t2_n_groups     = n_groups + 1
+        st.rerun()
+
+    # Persist edits to session state every render
+    new_prefix_group = dict(zip(edited_pg["Prefix"], edited_pg["Group"]))
+    st.session_state.t2_prefix_group = new_prefix_group
+
+    # Build roi-level groups dict
+    t2_groups = {p["name"]: new_prefix_group.get(p["name"].split("_")[0], "Group1")
+                 for p in polygons}
+    st.session_state.t2_groups = t2_groups
+
+    st.divider()
+
     # Well assignment
     st.subheader("Well Assignment")
     opt_cols  = st.columns(2)
@@ -377,7 +440,8 @@ def render_convert_tab():
     if randomize:
         seed = int(st.number_input("Random seed", value=42, step=1, key="rand_seed"))
 
-    well_map     = assign_wells(polygons, randomize=randomize, seed=seed, balance=balance)
+    well_map     = assign_wells(polygons, randomize=randomize, seed=seed, balance=balance,
+                               groups_dict=st.session_state.get("t2_groups"))
     plate_labels = get_plate_labels(well_map)
 
     # Show all plates in tabs
