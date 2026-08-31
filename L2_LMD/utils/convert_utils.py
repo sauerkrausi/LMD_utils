@@ -471,9 +471,32 @@ def render_convert_tab():
     new_prefix_group = dict(zip(edited_pg["Supergroup"], edited_pg["Group"]))
     st.session_state.t2_prefix_group = new_prefix_group
 
-    # Build roi-level groups dict (keyed by full roi name)
-    t2_groups = {p["name"]: new_prefix_group.get(p["name"].split("-")[0], "Group1")
-                 for p in polygons}
+    # Per-ROI fine-tuning — seeded from supergroup; key resets when bulk assignments change
+    sg_hash = hash(frozenset(new_prefix_group.items()) | frozenset([n_groups]))
+    with st.expander("ROI-level assignment", expanded=True):
+        st.caption("Pre-filled from supergroup above. Edit individual rows to split within a supergroup.")
+        roi_rows = []
+        for p in sorted(polygons, key=lambda x: x["name"]):
+            name = p["name"]
+            sg   = name.split("-")[0]
+            grp  = new_prefix_group.get(sg, group_options[0])
+            if grp not in group_options:
+                grp = group_options[0]
+            roi_rows.append({"ROI": name, "Supergroup": sg, "Group": grp})
+
+        edited_roi = st.data_editor(
+            pd.DataFrame(roi_rows),
+            column_config={
+                "ROI":        st.column_config.TextColumn("ROI",        disabled=True),
+                "Supergroup": st.column_config.TextColumn("Supergroup", disabled=True),
+                "Group":      st.column_config.SelectboxColumn("Group", options=group_options),
+            },
+            hide_index=True,
+            use_container_width=True,
+            key=f"t2_roi_editor_{sg_hash}",
+        )
+
+    t2_groups = dict(zip(edited_roi["ROI"], edited_roi["Group"]))
     st.session_state.t2_groups = t2_groups
 
     st.divider()
