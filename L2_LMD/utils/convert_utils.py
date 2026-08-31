@@ -197,6 +197,36 @@ def build_xml_plates(calib_pts: np.ndarray, polygons: list, well_map: dict) -> l
     return results
 
 
+def build_cutting_list(well_map: dict, groups_dict: dict = None) -> bytes:
+    """Cutting checklist CSV: Plate, Well, ROI, Group — sorted by plate then well."""
+    import csv as _csv
+
+    def _wkey(w):
+        try:
+            return (ord(w[0].upper()) - ord('A'), int(w[1:]))
+        except Exception:
+            return (99, 99)
+
+    rows = []
+    for name, full_well in well_map.items():
+        if "_" in full_well and full_well.split("_")[0].startswith("Plate"):
+            plate_label = full_well.split("_")[0]
+            well        = "_".join(full_well.split("_")[1:])
+        else:
+            plate_label = "Plate1"
+            well        = full_well
+        grp = (groups_dict or {}).get(name, name.split("_")[0] if "_" in name else name)
+        rows.append((plate_label, well, name, grp))
+
+    rows.sort(key=lambda r: (r[0], _wkey(r[1])))
+    buf = io.StringIO()
+    w   = _csv.writer(buf)
+    w.writerow(["Plate", "Well", "ROI", "Group"])
+    for row in rows:
+        w.writerow(row)
+    return buf.getvalue().encode("utf-8")
+
+
 def build_xml_zip(plate_xml_list: list, well_map: dict, stem: str) -> bytes:
     """Zip all plate XMLs + samples_and_wells.json."""
     buf = io.BytesIO()
@@ -461,6 +491,23 @@ def render_convert_tab():
             with col_plate:
                 preview_png = plot_well_preview(pwm, f"{pl} — {n_in_plate} ROIs")
                 st.image(preview_png, use_container_width=True)
+                st.download_button(
+                    f"Download {pl} plate map",
+                    preview_png,
+                    file_name=f"{stem}_{pl}_platemap.png",
+                    mime="image/png",
+                    key=f"dl_pm_{pl}",
+                )
+
+    # Cutting list — available immediately, no XML needed
+    cutting_csv = build_cutting_list(well_map, groups_dict=st.session_state.get("t2_groups"))
+    st.download_button(
+        "Download cutting list (CSV)",
+        cutting_csv,
+        file_name=f"{stem}_cutting_list.csv",
+        mime="text/csv",
+        key="dl_cutting_list",
+    )
 
     st.divider()
 
