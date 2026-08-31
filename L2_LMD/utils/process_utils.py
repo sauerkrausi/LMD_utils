@@ -224,10 +224,16 @@ def process_all_plates(plates: list, saw_dict: dict, stem: str) -> dict:
 
 
 def plot_plate_png(grid: dict, title: str) -> bytes:
+    """Outer ring = supergroup (first hyphen segment); fill = group (underscore prefix)."""
     all_labels  = sorted({grid[r][c] for r in ROWS for c in COLS if grid[r][c]})
     groups      = sorted({l.split("_")[0] for l in all_labels})
     palette     = cm.tab20
     group_color = {g: palette(i / max(len(groups), 1)) for i, g in enumerate(groups)}
+
+    supergroups = sorted({l.split("-")[0] for l in all_labels})
+    sg_palette  = cm.tab10
+    sg_color    = {sg: sg_palette(i / max(len(supergroups), 1))
+                   for i, sg in enumerate(supergroups)}
 
     fig, ax = plt.subplots(figsize=(14, 7))
     ax.set_xlim(-0.8, 12.5)
@@ -242,22 +248,32 @@ def plot_plate_png(grid: dict, title: str) -> bytes:
             y     = 7 - r_idx
             label = grid[r][c]
             grp   = label.split("_")[0] if label else ""
-            color = group_color.get(grp, "whitesmoke") if label else "whitesmoke"
-            edge  = "#999999" if not label else "#333333"
-            ax.add_patch(plt.Circle((x, y), 0.42, color=color, ec=edge, lw=0.7, zorder=2))
+            sg    = label.split("-")[0] if label else ""
             if label:
+                ax.add_patch(plt.Circle((x, y), 0.46, color=sg_color.get(sg, "whitesmoke"),
+                                        ec="none", zorder=1))
+                color = group_color.get(grp, "whitesmoke")
+                ax.add_patch(plt.Circle((x, y), 0.36, color=color, ec="#333333", lw=0.7, zorder=2))
                 ax.text(x, y, label.replace("_", "\n"), ha="center", va="center",
                         fontsize=4, zorder=3, color="black")
+            else:
+                ax.add_patch(plt.Circle((x, y), 0.42, color="whitesmoke",
+                                        ec="#999999", lw=0.7, zorder=2))
 
     for r_idx, r in enumerate(ROWS):
         ax.text(-0.65, 7 - r_idx, r, ha="right", va="center", fontsize=9, fontweight="bold")
     for c_idx, c in enumerate(COLS):
         ax.text(c_idx, 8.0, str(c), ha="center", va="bottom", fontsize=9, fontweight="bold")
 
-    patches = [mpatches.Patch(color=group_color[g], label=g) for g in groups]
-    if patches:
-        ax.legend(handles=patches, bbox_to_anchor=(1.01, 1), loc="upper left",
-                  fontsize=7, title="Sample group", title_fontsize=8)
+    sg_patches  = [mpatches.Patch(color=sg_color[sg], label=sg) for sg in supergroups]
+    grp_patches = [mpatches.Patch(color=group_color[g], label=g) for g in groups]
+    if sg_patches:
+        leg1 = ax.legend(handles=sg_patches, bbox_to_anchor=(1.01, 1), loc="upper left",
+                         fontsize=6, title="Supergroup", title_fontsize=7)
+        ax.add_artist(leg1)
+    if grp_patches:
+        ax.legend(handles=grp_patches, bbox_to_anchor=(1.01, 0.5), loc="upper left",
+                  fontsize=5, title="Group", title_fontsize=6)
 
     plt.tight_layout()
     buf = io.BytesIO()
@@ -276,7 +292,7 @@ def build_combined_sample_list(all_results: dict, groups_dict: dict = None) -> b
         for row in all_results[plate_label]["sample_rows"]:
             # row: [cut_order, roi, well, dropout, comments, processed]
             roi = row[1]
-            grp = (groups_dict or {}).get(roi, roi.split("_")[0] if "_" in roi else roi)
+            grp = (groups_dict or {}).get(roi, roi.split("-")[0] if "-" in roi else roi)
             w.writerow([plate_label, row[0], roi, row[2], grp, row[3], row[4], row[5]])
     return buf.getvalue().encode("utf-8")
 

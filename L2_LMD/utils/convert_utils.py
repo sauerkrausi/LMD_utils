@@ -215,7 +215,7 @@ def build_cutting_list(well_map: dict, groups_dict: dict = None) -> bytes:
         else:
             plate_label = "Plate1"
             well        = full_well
-        grp = (groups_dict or {}).get(name, name.split("_")[0] if "_" in name else name)
+        grp = (groups_dict or {}).get(name, name.split("-")[0] if "-" in name else name)
         rows.append((plate_label, well, name, grp))
 
     rows.sort(key=lambda r: (r[0], _wkey(r[1])))
@@ -242,10 +242,17 @@ def build_xml_zip(plate_xml_list: list, well_map: dict, stem: str) -> bytes:
 # 96-WELL PLATE PREVIEW
 # ============================================================
 def plot_well_preview(well_map: dict, title: str) -> bytes:
-    """well_map: {name: 'A1'} for a single plate."""
+    """well_map: {name: 'A1'} for a single plate.
+    Outer ring = supergroup (first hyphen segment); fill = group (underscore prefix)."""
     groups       = sorted({n.split("_")[0] for n in well_map})
     palette      = cm.tab20
     group_color  = {g: palette(i / max(len(groups), 1)) for i, g in enumerate(groups)}
+
+    supergroups  = sorted({n.split("-")[0] for n in well_map})
+    sg_palette   = cm.tab10
+    sg_color     = {sg: sg_palette(i / max(len(supergroups), 1))
+                    for i, sg in enumerate(supergroups)}
+
     well_to_name = {v: k for k, v in well_map.items()}
 
     fig, ax = plt.subplots(figsize=(12, 6))
@@ -262,22 +269,35 @@ def plot_well_preview(well_map: dict, title: str) -> bytes:
             well = f"{r}{c}"
             name = well_to_name.get(well, "")
             grp  = name.split("_")[0] if name else ""
-            color = group_color.get(grp, "whitesmoke") if name else "whitesmoke"
-            edge  = "#999999" if not name else "#333333"
-            ax.add_patch(plt.Circle((x, y), 0.42, color=color, ec=edge, lw=0.7, zorder=2))
+            sg   = name.split("-")[0] if name else ""
             if name:
+                # Outer ring: supergroup
+                ax.add_patch(plt.Circle((x, y), 0.46, color=sg_color.get(sg, "whitesmoke"),
+                                        ec="none", zorder=1))
+                # Inner fill: group
+                color = group_color.get(grp, "whitesmoke")
+                ax.add_patch(plt.Circle((x, y), 0.36, color=color, ec="#333333", lw=0.7, zorder=2))
                 ax.text(x, y, name.replace("_", "\n"), ha="center", va="center",
                         fontsize=3.5, zorder=3, color="black")
+            else:
+                ax.add_patch(plt.Circle((x, y), 0.42, color="whitesmoke",
+                                        ec="#999999", lw=0.7, zorder=2))
 
     for r_idx, r in enumerate(ROWS):
         ax.text(-0.65, 7 - r_idx, r, ha="right", va="center", fontsize=8, fontweight="bold")
     for c_idx, c in enumerate(COLS):
         ax.text(c_idx, 8.0, str(c), ha="center", va="bottom", fontsize=8, fontweight="bold")
 
-    patches = [mpatches.Patch(color=group_color[g], label=g) for g in groups]
-    if patches:
-        ax.legend(handles=patches, bbox_to_anchor=(1.01, 1), loc="upper left",
-                  fontsize=6, title="Group", title_fontsize=7)
+    # Two-part legend: supergroups + groups
+    sg_patches = [mpatches.Patch(color=sg_color[sg], label=sg) for sg in supergroups]
+    grp_patches = [mpatches.Patch(color=group_color[g], label=g) for g in groups]
+    if sg_patches:
+        leg1 = ax.legend(handles=sg_patches, bbox_to_anchor=(1.01, 1), loc="upper left",
+                         fontsize=6, title="Supergroup", title_fontsize=7)
+        ax.add_artist(leg1)
+    if grp_patches:
+        ax.legend(handles=grp_patches, bbox_to_anchor=(1.01, 0.5), loc="upper left",
+                  fontsize=5, title="Group", title_fontsize=6)
 
     plt.tight_layout()
     buf = io.BytesIO()
@@ -404,37 +424,38 @@ def render_convert_tab():
         "Groups stay together on the same plate and are piped to Tab 4 for MS queue batching."
     )
 
-    prefixes = sorted({p["name"].split("_")[0] for p in polygons})
-    n_pfx    = len(prefixes)
+    # Supergroup = first hyphen-delimited token (e.g. AS20, CH22, H20)
+    supergroups = sorted({p["name"].split("-")[0] for p in polygons})
+    n_sg        = len(supergroups)
 
-    # Reset group state when prefix list changes (new file)
-    if st.session_state.get("t2_prefixes") != prefixes:
-        st.session_state.t2_prefixes     = prefixes
-        st.session_state.t2_n_groups     = n_pfx
-        st.session_state.t2_prefix_group = {pfx: f"Group{i+1}" for i, pfx in enumerate(prefixes)}
+    # Reset group state when supergroup list changes (new file)
+    if st.session_state.get("t2_prefixes") != supergroups:
+        st.session_state.t2_prefixes     = supergroups
+        st.session_state.t2_n_groups     = n_sg
+        st.session_state.t2_prefix_group = {sg: f"Group{i+1}" for i, sg in enumerate(supergroups)}
 
-    n_groups      = max(st.session_state.get("t2_n_groups", n_pfx), n_pfx)
+    n_groups      = max(st.session_state.get("t2_n_groups", n_sg), n_sg)
     group_options = [f"Group{i+1}" for i in range(n_groups)]
     prefix_group  = st.session_state.get("t2_prefix_group", {})
 
     roi_count = {}
     for p in polygons:
-        pfx = p["name"].split("_")[0]
-        roi_count[pfx] = roi_count.get(pfx, 0) + 1
+        sg = p["name"].split("-")[0]
+        roi_count[sg] = roi_count.get(sg, 0) + 1
 
     init_rows = []
-    for pfx in prefixes:
-        grp = prefix_group.get(pfx, group_options[0])
+    for sg in supergroups:
+        grp = prefix_group.get(sg, group_options[0])
         if grp not in group_options:
             grp = group_options[0]
-        init_rows.append({"Prefix": pfx, "# ROIs": roi_count.get(pfx, 0), "Group": grp})
+        init_rows.append({"Supergroup": sg, "# ROIs": roi_count.get(sg, 0), "Group": grp})
 
     edited_pg = st.data_editor(
         pd.DataFrame(init_rows),
         column_config={
-            "Prefix": st.column_config.TextColumn("Prefix", disabled=True),
-            "# ROIs": st.column_config.NumberColumn("# ROIs", disabled=True),
-            "Group":  st.column_config.SelectboxColumn("Group", options=group_options),
+            "Supergroup": st.column_config.TextColumn("Supergroup", disabled=True),
+            "# ROIs":     st.column_config.NumberColumn("# ROIs",   disabled=True),
+            "Group":      st.column_config.SelectboxColumn("Group", options=group_options),
         },
         hide_index=True,
         use_container_width=True,
@@ -442,16 +463,16 @@ def render_convert_tab():
     )
 
     if st.button("+ Add Group", key="t2_add_group"):
-        st.session_state.t2_prefix_group = dict(zip(edited_pg["Prefix"], edited_pg["Group"]))
+        st.session_state.t2_prefix_group = dict(zip(edited_pg["Supergroup"], edited_pg["Group"]))
         st.session_state.t2_n_groups     = n_groups + 1
         st.rerun()
 
     # Persist edits to session state every render
-    new_prefix_group = dict(zip(edited_pg["Prefix"], edited_pg["Group"]))
+    new_prefix_group = dict(zip(edited_pg["Supergroup"], edited_pg["Group"]))
     st.session_state.t2_prefix_group = new_prefix_group
 
-    # Build roi-level groups dict
-    t2_groups = {p["name"]: new_prefix_group.get(p["name"].split("_")[0], "Group1")
+    # Build roi-level groups dict (keyed by full roi name)
+    t2_groups = {p["name"]: new_prefix_group.get(p["name"].split("-")[0], "Group1")
                  for p in polygons}
     st.session_state.t2_groups = t2_groups
 
