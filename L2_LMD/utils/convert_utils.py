@@ -424,96 +424,118 @@ def render_convert_tab():
         "Groups stay together on the same plate and are piped to Tab 4 for MS queue batching."
     )
 
-    # Supergroup = first hyphen-delimited token (e.g. AS20, CH22, H20)
+    # Auto-detected supergroups: first hyphen-delimited token (e.g. AS20, CH22, H20)
     supergroups = sorted({p["name"].split("-")[0] for p in polygons})
     n_sg        = len(supergroups)
 
-    # Reset group state when supergroup list changes (new file)
+    # Reset on new file
     if st.session_state.get("t2_prefixes") != supergroups:
-        st.session_state.t2_prefixes     = supergroups
-        st.session_state.t2_n_groups     = n_sg
-        st.session_state.t2_prefix_group = {sg: f"Group{i+1}" for i, sg in enumerate(supergroups)}
-        st.session_state.t2_sg_alias_map = {sg: sg for sg in supergroups}  # user-editable labels
+        st.session_state.t2_prefixes       = supergroups
+        st.session_state.t2_extra_prefixes = []
+        st.session_state.t2_prefix_group   = {sg: f"Group{i+1}" for i, sg in enumerate(supergroups)}
 
-    n_groups      = max(n_sg + 5, 20)          # fixed pool — no button needed
+    extra_prefixes = st.session_state.get("t2_extra_prefixes", [])
+
+    # All prefixes sorted longest-first — longer prefix wins (greedy match)
+    all_prefixes = sorted(set(supergroups) | set(extra_prefixes), key=lambda x: -len(x))
+
+    def _match_prefix(roi_name):
+        for pfx in all_prefixes:   # longest first — most specific wins
+            if roi_name.startswith(pfx):
+                return pfx
+        return roi_name.split("-")[0]
+
+    # ROI counts per prefix (recomputed each render so counts update after Add/Remove)
+    roi_count = {}
+    for p in polygons:
+        pfx = _match_prefix(p["name"])
+        roi_count[pfx] = roi_count.get(pfx, 0) + 1
+
+    n_groups      = max(len(all_prefixes) + 5, 20)
     group_options = [f"Group{i+1}" for i in range(n_groups)]
     prefix_group  = st.session_state.get("t2_prefix_group", {})
 
-    roi_count = {}
-    for p in polygons:
-        sg = p["name"].split("-")[0]
-        roi_count[sg] = roi_count.get(sg, 0) + 1
-
-    sg_alias_map = st.session_state.get("t2_sg_alias_map", {})
-
+    # Display table: auto supergroups first, then custom extras
+    display_prefixes = sorted(supergroups) + sorted(extra_prefixes)
     init_rows = []
-    for sg in supergroups:
-        grp      = prefix_group.get(sg, group_options[0])
+    for i, pfx in enumerate(display_prefixes):
+        grp = prefix_group.get(pfx, group_options[min(i, n_groups - 1)])
         if grp not in group_options:
             grp = group_options[0]
-        user_sg  = sg_alias_map.get(sg, sg)
-        init_rows.append({"_key": sg, "Supergroup": user_sg,
-                           "# ROIs": roi_count.get(sg, 0), "Group": grp})
+        init_rows.append({"Prefix": pfx, "# ROIs": roi_count.get(pfx, 0), "Group": grp})
 
     edited_pg = st.data_editor(
         pd.DataFrame(init_rows),
         column_config={
-            "_key":       st.column_config.TextColumn("_key",      disabled=True),
-            "Supergroup": st.column_config.TextColumn("Supergroup"),           # editable
-            "# ROIs":     st.column_config.NumberColumn("# ROIs",  disabled=True),
-            "Group":      st.column_config.SelectboxColumn("Group", options=group_options),
+            "Prefix": st.column_config.TextColumn("Supergroup", disabled=True),
+            "# ROIs": st.column_config.NumberColumn("# ROIs",   disabled=True),
+            "Group":  st.column_config.SelectboxColumn("Group",  options=group_options),
         },
-        column_order=["Supergroup", "# ROIs", "Group"],   # hides _key from display
-        num_rows="dynamic",                                # allows adding new supergroups
         hide_index=True,
+        num_rows="fixed",
         use_container_width=True,
-        key="t2_group_editor",
+        key=f"t2_group_editor_{hash(tuple(sorted(all_prefixes)))}",
     )
 
-    # Persist edits — handle both auto-detected rows (_key set) and new user rows (_key empty)
-    new_prefix_group, new_sg_alias_map = {}, {}
+    # Persist group assignments
+    new_prefix_group = {}
     for _, row in edited_pg.iterrows():
-        k = str(row.get("_key", "") or "").strip()
-        if not k or k == "nan":
-            k = str(row.get("Supergroup", "") or "").strip()
-        sg = str(row.get("Supergroup", k) or k).strip()
+        pfx = str(row["Prefix"]).strip()
         grp = row.get("Group") or group_options[0]
-        if k:
-            new_prefix_group[k] = grp
-            new_sg_alias_map[k] = sg
+        if pfx:
+            new_prefix_group[pfx] = grp
     st.session_state.t2_prefix_group = new_prefix_group
-    st.session_state.t2_sg_alias_map = new_sg_alias_map
 
-    # Build sorted alias list (longest alias first) for prefix matching
-    _alias_lookup = sorted(new_sg_alias_map.items(), key=lambda x: -len(x[1]))
+    # Add custom prefix for subdivision (e.g. type H20-015885 to split off from H20)
+    st.caption("To subdivide a group, add a more specific prefix:")
+    _ac1, _ac2 = st.columns([3, 1])
+    new_pfx_input = _ac1.text_input("New prefix", key="t2_new_prefix_input",
+                                    label_visibility="collapsed",
+                                    placeholder="e.g. H20-015885")
+    if _ac2.button("Add prefix", key="t2_add_prefix_btn", use_container_width=True):
+        _p = new_pfx_input.strip()
+        if _p and _p not in extra_prefixes and _p not in supergroups:
+            st.session_state.t2_extra_prefixes.append(_p)
+            _used = set(new_prefix_group.values())
+            for _g in group_options:
+                if _g not in _used:
+                    st.session_state.t2_prefix_group[_p] = _g
+                    break
+            st.rerun()
+        elif _p in extra_prefixes or _p in supergroups:
+            st.warning(f"Prefix '{_p}' already exists.")
 
-    def _match_supergroup(roi_name):
-        """Return (group, sg_display) using longest-prefix match — no exact shortcut."""
-        # Always try longest-alias prefix first so H20-015885 wins over H20
-        for orig_key, alias in _alias_lookup:
-            if roi_name.startswith(alias) or roi_name.startswith(orig_key):
-                return new_prefix_group.get(orig_key, group_options[0]), alias
-        auto_sg = roi_name.split("-")[0]
-        return new_prefix_group.get(auto_sg, group_options[0]), auto_sg
+    if extra_prefixes:
+        _rc1, _rc2 = st.columns([3, 1])
+        to_remove = _rc1.multiselect("Remove", extra_prefixes, key="t2_remove_prefix",
+                                     label_visibility="collapsed",
+                                     placeholder="Select custom prefixes to remove")
+        if _rc2.button("Remove", key="t2_remove_btn", use_container_width=True) and to_remove:
+            for _p in to_remove:
+                if _p in st.session_state.t2_extra_prefixes:
+                    st.session_state.t2_extra_prefixes.remove(_p)
+                st.session_state.t2_prefix_group.pop(_p, None)
+            st.rerun()
 
-    # Per-ROI fine-tuning — seeded from supergroup; key resets when bulk assignments change
-    sg_hash = hash(frozenset(new_prefix_group.items()) | frozenset(new_sg_alias_map.items()) | frozenset([n_groups]))
+    # Per-ROI fine-tuning; table key resets when prefix assignments change
+    sg_hash = hash(tuple(sorted(new_prefix_group.items())))
     with st.expander("ROI-level assignment", expanded=True):
-        st.caption("Pre-filled from supergroup above. Edit **Supergroup** or **Group** to override per ROI.")
+        st.caption("Pre-filled from prefix table above. Edit **Group** to override per ROI.")
         roi_rows = []
         for p in sorted(polygons, key=lambda x: x["name"]):
-            name         = p["name"]
-            grp, sg_disp = _match_supergroup(name)
+            name = p["name"]
+            pfx  = _match_prefix(name)
+            grp  = new_prefix_group.get(pfx, group_options[0])
             if grp not in group_options:
                 grp = group_options[0]
-            roi_rows.append({"ROI": name, "Supergroup": sg_disp, "Group": grp})
+            roi_rows.append({"ROI": name, "Prefix": pfx, "Group": grp})
 
         edited_roi = st.data_editor(
             pd.DataFrame(roi_rows),
             column_config={
-                "ROI":        st.column_config.TextColumn("ROI",        disabled=True),
-                "Supergroup": st.column_config.TextColumn("Supergroup"),           # editable
-                "Group":      st.column_config.SelectboxColumn("Group", options=group_options),
+                "ROI":    st.column_config.TextColumn("ROI",    disabled=True),
+                "Prefix": st.column_config.TextColumn("Prefix", disabled=True),
+                "Group":  st.column_config.SelectboxColumn("Group", options=group_options),
             },
             hide_index=True,
             use_container_width=True,
