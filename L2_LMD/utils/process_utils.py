@@ -266,29 +266,34 @@ def plot_plate_png(grid: dict, title: str) -> bytes:
     return buf.getvalue()
 
 
-def build_combined_sample_list(all_results: dict) -> bytes:
-    """Combine per-plate sample rows into one CSV with a Plate column."""
+def build_combined_sample_list(all_results: dict, groups_dict: dict = None) -> bytes:
+    """Combine per-plate sample rows into one CSV with Plate and Group columns."""
     buf = io.StringIO()
     w   = csv.writer(buf)
-    w.writerow(["Plate", "cut order", "ROI", "Well_ID", "Dropout {Y/N}", "comments", "processed"])
+    w.writerow(["Plate", "cut order", "ROI", "Well_ID", "Group",
+                "Dropout {Y/N}", "comments", "processed"])
     for plate_label in sorted(all_results.keys()):
         for row in all_results[plate_label]["sample_rows"]:
-            w.writerow([plate_label] + row)
+            # row: [cut_order, roi, well, dropout, comments, processed]
+            roi = row[1]
+            grp = (groups_dict or {}).get(roi, roi.split("_")[0] if "_" in roi else roi)
+            w.writerow([plate_label, row[0], roi, row[2], grp, row[3], row[4], row[5]])
     return buf.getvalue().encode("utf-8")
 
 
-def build_multi_zip(all_results: dict, png_map: dict, stem: str) -> bytes:
+def build_multi_zip(all_results: dict, png_map: dict, stem: str,
+                    groups_dict: dict = None) -> bytes:
     """Package all per-plate outputs into one zip."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for plate_label, r in all_results.items():
             ps = f"{stem}_{plate_label}"
-            z.writestr(f"{ps}_sorted.xml",      r["sorted_xml"])
-            z.writestr(f"{ps}_96wellplate.csv", r["wellplate_csv"])
+            z.writestr(f"{ps}_sorted.xml",       r["sorted_xml"])
+            z.writestr(f"{ps}_96wellplate.csv",  r["wellplate_csv"])
             z.writestr(f"{ps}_updated_saw.json", r["updated_json"])
             if plate_label in png_map:
                 z.writestr(f"{ps}_platemap.png", png_map[plate_label])
-        combined_csv = build_combined_sample_list(all_results)
+        combined_csv = build_combined_sample_list(all_results, groups_dict=groups_dict)
         z.writestr(f"{stem}_sample_list.csv", combined_csv)
     return buf.getvalue()
 
@@ -372,12 +377,13 @@ def render_process_tab():
     c2.metric("Plates", len(plates))
 
     if st.button("Process all plates", type="primary"):
+        groups_dict = st.session_state.get("t2_groups")
         with st.spinner(f"Processing {len(plates)} plate(s)..."):
-            all_results = process_all_plates(plates, saw_dict, stem)
-            png_map     = {pl: plot_plate_png(r["grid"], f"{pl} — well assignment")
-                           for pl, r in all_results.items()}
-            combined_csv = build_combined_sample_list(all_results)
-            zip_bytes    = build_multi_zip(all_results, png_map, stem)
+            all_results  = process_all_plates(plates, saw_dict, stem)
+            png_map      = {pl: plot_plate_png(r["grid"], f"{pl} — well assignment")
+                            for pl, r in all_results.items()}
+            combined_csv = build_combined_sample_list(all_results, groups_dict=groups_dict)
+            zip_bytes    = build_multi_zip(all_results, png_map, stem, groups_dict=groups_dict)
 
         st.session_state.proc_all_results = all_results
         st.session_state.proc_png_map     = png_map
