@@ -464,20 +464,39 @@ def render_convert_tab():
             "Group":      st.column_config.SelectboxColumn("Group", options=group_options),
         },
         column_order=["Supergroup", "# ROIs", "Group"],   # hides _key from display
+        num_rows="dynamic",                                # allows adding new supergroups
         hide_index=True,
         use_container_width=True,
         key="t2_group_editor",
     )
 
-    if st.button("+ Add Group", key="t2_add_group"):
-        st.session_state.t2_prefix_group = dict(zip(edited_pg["_key"], edited_pg["Group"]))
-        st.session_state.t2_sg_alias_map = dict(zip(edited_pg["_key"], edited_pg["Supergroup"]))
+    if st.button("+ Add Group option", key="t2_add_group",
+                 help="Adds a new Group option (Group1, Group2...) to the dropdown"):
+        # Capture current edits before rerun
+        _tmp_pg, _tmp_sg = {}, {}
+        for _, row in edited_pg.iterrows():
+            k = str(row.get("_key", "") or "").strip()
+            if not k or k == "nan":
+                k = str(row.get("Supergroup", "") or "").strip()
+            if k:
+                _tmp_pg[k] = row.get("Group", group_options[0])
+                _tmp_sg[k] = str(row.get("Supergroup", k) or k).strip()
+        st.session_state.t2_prefix_group = _tmp_pg
+        st.session_state.t2_sg_alias_map = _tmp_sg
         st.session_state.t2_n_groups     = n_groups + 1
         st.rerun()
 
-    # Persist edits
-    new_prefix_group = dict(zip(edited_pg["_key"], edited_pg["Group"]))
-    new_sg_alias_map = dict(zip(edited_pg["_key"], edited_pg["Supergroup"]))
+    # Persist edits — handle both auto-detected rows (_key set) and new user rows (_key empty)
+    new_prefix_group, new_sg_alias_map = {}, {}
+    for _, row in edited_pg.iterrows():
+        k = str(row.get("_key", "") or "").strip()
+        if not k or k == "nan":
+            k = str(row.get("Supergroup", "") or "").strip()
+        sg = str(row.get("Supergroup", k) or k).strip()
+        grp = row.get("Group") or group_options[0]
+        if k:
+            new_prefix_group[k] = grp
+            new_sg_alias_map[k] = sg
     st.session_state.t2_prefix_group = new_prefix_group
     st.session_state.t2_sg_alias_map = new_sg_alias_map
 
