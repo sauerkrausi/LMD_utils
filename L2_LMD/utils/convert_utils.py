@@ -435,7 +435,7 @@ def render_convert_tab():
         st.session_state.t2_prefix_group = {sg: f"Group{i+1}" for i, sg in enumerate(supergroups)}
         st.session_state.t2_sg_alias_map = {sg: sg for sg in supergroups}  # user-editable labels
 
-    n_groups      = max(st.session_state.get("t2_n_groups", n_sg), n_sg)
+    n_groups      = max(n_sg + 5, 20)          # fixed pool — no button needed
     group_options = [f"Group{i+1}" for i in range(n_groups)]
     prefix_group  = st.session_state.get("t2_prefix_group", {})
 
@@ -470,22 +470,6 @@ def render_convert_tab():
         key="t2_group_editor",
     )
 
-    if st.button("+ Add Group option", key="t2_add_group",
-                 help="Adds a new Group option (Group1, Group2...) to the dropdown"):
-        # Capture current edits before rerun
-        _tmp_pg, _tmp_sg = {}, {}
-        for _, row in edited_pg.iterrows():
-            k = str(row.get("_key", "") or "").strip()
-            if not k or k == "nan":
-                k = str(row.get("Supergroup", "") or "").strip()
-            if k:
-                _tmp_pg[k] = row.get("Group", group_options[0])
-                _tmp_sg[k] = str(row.get("Supergroup", k) or k).strip()
-        st.session_state.t2_prefix_group = _tmp_pg
-        st.session_state.t2_sg_alias_map = _tmp_sg
-        st.session_state.t2_n_groups     = n_groups + 1
-        st.rerun()
-
     # Persist edits — handle both auto-detected rows (_key set) and new user rows (_key empty)
     new_prefix_group, new_sg_alias_map = {}, {}
     for _, row in edited_pg.iterrows():
@@ -504,16 +488,13 @@ def render_convert_tab():
     _alias_lookup = sorted(new_sg_alias_map.items(), key=lambda x: -len(x[1]))
 
     def _match_supergroup(roi_name):
-        """Return (group, sg_display) using longest-prefix match on user-defined aliases."""
-        auto_sg = roi_name.split("-")[0]
-        # 1. Exact match on original auto-detected key
-        if auto_sg in new_prefix_group:
-            return new_prefix_group[auto_sg], new_sg_alias_map.get(auto_sg, auto_sg)
-        # 2. Longest alias that is a prefix of the ROI name
+        """Return (group, sg_display) using longest-prefix match — no exact shortcut."""
+        # Always try longest-alias prefix first so H20-015885 wins over H20
         for orig_key, alias in _alias_lookup:
             if roi_name.startswith(alias) or roi_name.startswith(orig_key):
                 return new_prefix_group.get(orig_key, group_options[0]), alias
-        return group_options[0], auto_sg
+        auto_sg = roi_name.split("-")[0]
+        return new_prefix_group.get(auto_sg, group_options[0]), auto_sg
 
     # Per-ROI fine-tuning — seeded from supergroup; key resets when bulk assignments change
     sg_hash = hash(frozenset(new_prefix_group.items()) | frozenset(new_sg_alias_map.items()) | frozenset([n_groups]))
