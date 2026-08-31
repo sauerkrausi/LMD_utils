@@ -24,16 +24,21 @@ QuPath export (.geojson)
         |
         v  (.geojson, reclassified)
 [ Tab 2: Convert ]
-  Select calibration points, assign wells, generate LMD XML
+  Select calibration points
+  Define sample groups / supergroups
+  Assign wells across 96-well plates (group-aware bin-packing)
+  Generate LMD XML(s), plate maps, cutting list
   Powered by py-lmd (MannLabs)
         |
-        v  (.xml + samples_and_wells.json)  <-- or upload zip from Coscia Lab converter
-[ Tab 3: Process ]
-  Sort XML by well order, generate 96-well plate map + sample list CSV
+        v  (.xml per plate + samples_and_wells.json)
+[ Tab 3: Post-Cutting QC ]
+  Mark dropout ROIs after stereomicroscope inspection
+  Generate dropout-free XMLs for LMD re-runs on fresh sections
         |
-        v  (sample_list.csv)
+        v  (sample_list.csv, dropouts excluded)
 [ Tab 4: MS Queue ]
   Generate instrument queue (XLSX + plate maps) with K562, Supermix, Blank controls
+  Run groups re-indexed from 1 after dropout removal
 ```
 
 ---
@@ -43,41 +48,58 @@ QuPath export (.geojson)
 ### Tab 1: Reclassify GeoJSON
 Copies `properties.name` into `properties.classification.name` for each annotation.
 Required before conversion if QuPath annotations were drawn without a class assigned.
-Optional if annotations already have classification set.
 
 **Input:** `*.geojson` from QuPath export  
 **Output:** `*_reclassified.geojson`
 
+---
+
 ### Tab 2: Convert to LMD XML
 Converts the reclassified GeoJSON to LMD XML using the `py-lmd` library.
 
-- Select 3 calibration points from the GeoJSON
-- Wells assigned alphabetically (A1, A2, ...) with optional randomization
-- QC image shows annotation coverage within calibration triangle
+**Calibration:** Select 3 point annotations as calibration markers. Coverage check confirms
+all ROI centroids lie within the calibration triangle.
+
+**Sample Groups:** Auto-detected from name prefixes (first hyphen-delimited token, e.g. `AS20`, `CH22`, `H20`).
+Groups control which ROIs are kept together on the same plate and flow through to the MS queue.
+- Edit the **Group** dropdown per supergroup to reassign
+- Add custom prefixes (e.g. `H20-015885`) to subdivide a supergroup — the longer prefix wins
+  in matching, and the original supergroup disappears automatically once all its ROIs are captured
+- Supergroups with 0 ROIs (fully captured by a longer prefix) are hidden automatically
+- Per-ROI fine-tuning available in the expandable ROI-level table
+
+**Well Assignment:** Alphabetical with optional randomization. Multi-plate support with
+group-aware bin-packing: sample groups stay together while plates are balanced as evenly as possible.
 
 **Input:** `*_reclassified.geojson` (from Tab 1 or upload)  
-**Output:** `*.xml`, `samples_and_wells.json`, `collection.png`
+**Output (immediate):** Plate map PNGs, cutting list CSV  
+**Output (after Convert):** `*_PlateN.xml` per plate, `samples_and_wells.json`, all-plates zip
 
-### Tab 3: Process LMD Collection
-Sorts the LMD XML by well order, renumbers shapes, assigns new well positions,
-and generates all downstream files.
+---
 
-**Input:** XML + JSON from Tab 2 (piped directly or upload zip from Coscia Lab converter)  
-> Note: zip upload is provided as fallback for users coming from the
-> [Coscia Lab QuPath-to-LMD converter](https://qupath-to-lmd-mdcberlin.streamlit.app/)
+### Tab 3: Post-Cutting QC
+Mark ROIs that failed cutting after inspecting the plate under the stereomicroscope.
+Dropout ROIs are excluded from the MS queue (Tab 4) and from the re-run XMLs.
 
-**Output:** `*_sorted.xml`, `*_96wellplate.csv`, `*_sample_list.csv`, `*_platemap.png`
+**Input:** Sample list piped from Tab 2 (or CSV upload)  
+**Output:**
+- `*_sample_list.csv` — updated with Dropout Y/N, piped to Tab 4
+- `*_rerun.zip` — XMLs with dropout ROIs removed, for re-running LMD on a fresh section
+
+---
 
 ### Tab 4: MS Sample Queue
 Generates the Bruker timsTOF instrument queue from the sample list CSV.
+Dropout ROIs are automatically excluded. Run groups are re-indexed from 1.
 
 - K562, Supermix, Blank controls with configurable loads
 - Spare vials (max(3, 10%) per control type)
-- One-slot mode: fit samples + controls into a single 96-well plate when possible
-- Dropout handling: excluded from queue, shown in grey with red label on plate map
+- Group-aware: each group gets controls at the start, then a Blank after every 6 samples
+- Per-plate slot assignment (Plate1: Slot1+Slot2, Plate2: Slot3+Slot4, ...)
+- Dropout wells shown in grey with red label on plate map
 
 **Input:** `*_sample_list.csv` (from Tab 3 or upload)  
-**Output:** `*_queue.xlsx`, `*_slot1.csv/png`, `*_slot2.csv/png`
+**Output:** `*_queue.xlsx`, per-slot CSVs and plate map PNGs (zip)
 
 ---
 
@@ -91,10 +113,9 @@ L2_LMD/
   utils/
     __init__.py
     geojson_utils.py      # Tab 1: reclassify logic
-    convert_utils.py      # Tab 2: py-lmd Collection wrapper, calibration, well assignment
-    plate_utils.py        # shared: well layout helpers, plate visualization
-    process_utils.py      # Tab 3: sort XML, generate plate CSV + sample list
-    ms_queue_utils.py     # Tab 4: queue builder, slot2 layout, controls
+    convert_utils.py      # Tab 2: py-lmd wrapper, calibration, group editor, well assignment
+    process_utils.py      # Tab 3: dropout editor, dropout-free XML generation
+    ms_queue_utils.py     # Tab 4: queue builder, slot layout, controls
 ```
 
 ---

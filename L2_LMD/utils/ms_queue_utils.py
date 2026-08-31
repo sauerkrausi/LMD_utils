@@ -702,6 +702,16 @@ def render_ms_queue_tab():
             if roi and grp:
                 csv_group_map[roi] = grp
 
+    # Re-index groups compactly from 1 (order of first appearance among active samples)
+    if csv_group_map:
+        seen = []
+        for r in samples:
+            g = csv_group_map.get(r["ROI"].strip(), "")
+            if g and g not in seen:
+                seen.append(g)
+        remap = {g: f"Group{i+1}" for i, g in enumerate(seen)}
+        csv_group_map = {roi: remap.get(g, g) for roi, g in csv_group_map.items()}
+
     confirmed_assignments = st.session_state.msq_group_assignments or {}
 
     init_data = [
