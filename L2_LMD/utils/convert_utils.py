@@ -433,6 +433,7 @@ def render_convert_tab():
         st.session_state.t2_prefixes     = supergroups
         st.session_state.t2_n_groups     = n_sg
         st.session_state.t2_prefix_group = {sg: f"Group{i+1}" for i, sg in enumerate(supergroups)}
+        st.session_state.t2_sg_alias_map = {sg: sg for sg in supergroups}  # user-editable labels
 
     n_groups      = max(st.session_state.get("t2_n_groups", n_sg), n_sg)
     group_options = [f"Group{i+1}" for i in range(n_groups)]
@@ -443,52 +444,62 @@ def render_convert_tab():
         sg = p["name"].split("-")[0]
         roi_count[sg] = roi_count.get(sg, 0) + 1
 
+    sg_alias_map = st.session_state.get("t2_sg_alias_map", {})
+
     init_rows = []
     for sg in supergroups:
-        grp = prefix_group.get(sg, group_options[0])
+        grp      = prefix_group.get(sg, group_options[0])
         if grp not in group_options:
             grp = group_options[0]
-        init_rows.append({"Supergroup": sg, "# ROIs": roi_count.get(sg, 0), "Group": grp})
+        user_sg  = sg_alias_map.get(sg, sg)
+        init_rows.append({"_key": sg, "Supergroup": user_sg,
+                           "# ROIs": roi_count.get(sg, 0), "Group": grp})
 
     edited_pg = st.data_editor(
         pd.DataFrame(init_rows),
         column_config={
-            "Supergroup": st.column_config.TextColumn("Supergroup", disabled=True),
-            "# ROIs":     st.column_config.NumberColumn("# ROIs",   disabled=True),
+            "_key":       st.column_config.TextColumn("_key",      disabled=True),
+            "Supergroup": st.column_config.TextColumn("Supergroup"),           # editable
+            "# ROIs":     st.column_config.NumberColumn("# ROIs",  disabled=True),
             "Group":      st.column_config.SelectboxColumn("Group", options=group_options),
         },
+        column_order=["Supergroup", "# ROIs", "Group"],   # hides _key from display
         hide_index=True,
         use_container_width=True,
         key="t2_group_editor",
     )
 
     if st.button("+ Add Group", key="t2_add_group"):
-        st.session_state.t2_prefix_group = dict(zip(edited_pg["Supergroup"], edited_pg["Group"]))
+        st.session_state.t2_prefix_group = dict(zip(edited_pg["_key"], edited_pg["Group"]))
+        st.session_state.t2_sg_alias_map = dict(zip(edited_pg["_key"], edited_pg["Supergroup"]))
         st.session_state.t2_n_groups     = n_groups + 1
         st.rerun()
 
-    # Persist edits to session state every render
-    new_prefix_group = dict(zip(edited_pg["Supergroup"], edited_pg["Group"]))
+    # Persist edits
+    new_prefix_group = dict(zip(edited_pg["_key"], edited_pg["Group"]))
+    new_sg_alias_map = dict(zip(edited_pg["_key"], edited_pg["Supergroup"]))
     st.session_state.t2_prefix_group = new_prefix_group
+    st.session_state.t2_sg_alias_map = new_sg_alias_map
 
     # Per-ROI fine-tuning — seeded from supergroup; key resets when bulk assignments change
-    sg_hash = hash(frozenset(new_prefix_group.items()) | frozenset([n_groups]))
+    sg_hash = hash(frozenset(new_prefix_group.items()) | frozenset(new_sg_alias_map.items()) | frozenset([n_groups]))
     with st.expander("ROI-level assignment", expanded=True):
-        st.caption("Pre-filled from supergroup above. Edit individual rows to split within a supergroup.")
+        st.caption("Pre-filled from supergroup above. Edit **Supergroup** or **Group** to override per ROI.")
         roi_rows = []
         for p in sorted(polygons, key=lambda x: x["name"]):
-            name = p["name"]
-            sg   = name.split("-")[0]
-            grp  = new_prefix_group.get(sg, group_options[0])
+            name    = p["name"]
+            auto_sg = name.split("-")[0]
+            sg_disp = new_sg_alias_map.get(auto_sg, auto_sg)   # user-defined label
+            grp     = new_prefix_group.get(auto_sg, group_options[0])
             if grp not in group_options:
                 grp = group_options[0]
-            roi_rows.append({"ROI": name, "Supergroup": sg, "Group": grp})
+            roi_rows.append({"ROI": name, "Supergroup": sg_disp, "Group": grp})
 
         edited_roi = st.data_editor(
             pd.DataFrame(roi_rows),
             column_config={
                 "ROI":        st.column_config.TextColumn("ROI",        disabled=True),
-                "Supergroup": st.column_config.TextColumn("Supergroup", disabled=True),
+                "Supergroup": st.column_config.TextColumn("Supergroup"),           # editable
                 "Group":      st.column_config.SelectboxColumn("Group", options=group_options),
             },
             hide_index=True,
