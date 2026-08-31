@@ -93,19 +93,47 @@ def count_inside_triangle(calib_pts: np.ndarray, polygons: list):
 def assign_wells(polygons: list, randomize: bool = False, seed: int = 42,
                  balance: bool = False) -> dict:
     """Returns {name: 'Plate1_A1'} across as many 96-well plates as needed.
-    balance=True distributes samples evenly (e.g. 67/67/67 instead of 96/96/9)."""
+    balance=True: group-aware bin-packing keeps sample groups on the same plate
+    while spreading load as evenly as possible."""
     import math
-    names = sorted(set(p["name"] for p in polygons))
+    from collections import defaultdict
+
+    names    = sorted(set(p["name"] for p in polygons))
+    n        = len(names)
+    n_plates = max(1, math.ceil(n / 96))
+
+    if not balance or n_plates == 1:
+        # Sequential fill
+        if randomize:
+            random.Random(seed).shuffle(names)
+        result = {}
+        for i, name in enumerate(names):
+            result[name] = f"Plate{i // 96 + 1}_{ALL_WELLS[i % 96]}"
+        return result
+
+    # Group-aware bin-packing: group = everything before first '_'
+    groups = defaultdict(list)
+    for name in names:
+        grp = name.split("_")[0]
+        groups[grp].append(name)
+
+    group_list = sorted(groups.items(), key=lambda x: -len(x[1]))   # largest first (LPT)
     if randomize:
-        random.Random(seed).shuffle(names)
-    n = len(names)
-    n_plates   = max(1, math.ceil(n / 96))
-    plate_size = math.ceil(n / n_plates) if balance else 96
+        random.Random(seed).shuffle(group_list)
+
+    plate_counts     = [0] * n_plates
+    plate_name_lists = defaultdict(list)
+
+    for grp, grp_names in group_list:
+        min_plate = min(range(n_plates), key=lambda i: plate_counts[i])
+        plate_name_lists[min_plate].extend(grp_names)
+        plate_counts[min_plate] += len(grp_names)
+
     result = {}
-    for i, name in enumerate(names):
-        plate_num    = i // plate_size + 1
-        well         = ALL_WELLS[i % plate_size]
-        result[name] = f"Plate{plate_num}_{well}"
+    for plate_idx in range(n_plates):
+        plate_names = sorted(plate_name_lists[plate_idx])
+        for j, name in enumerate(plate_names):
+            result[name] = f"Plate{plate_idx + 1}_{ALL_WELLS[j]}"
     return result
 
 
@@ -343,7 +371,7 @@ def render_convert_tab():
     balance   = opt_cols[1].checkbox(
         "Balance samples across plates",
         value=True,
-        help="Distribute samples evenly (e.g. 67/67/67 instead of 96/96/9)"
+        help="Keep sample groups together; spread groups across plates as evenly as possible"
     )
     seed = 42
     if randomize:
