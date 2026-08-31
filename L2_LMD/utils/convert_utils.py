@@ -457,8 +457,9 @@ def render_convert_tab():
     group_options = [f"Group{i+1}" for i in range(n_groups)]
     prefix_group  = st.session_state.get("t2_prefix_group", {})
 
-    # Display table: auto supergroups first, then custom extras
-    display_prefixes = sorted(supergroups) + sorted(extra_prefixes)
+    # Display table: auto supergroups first, then custom extras; hide any with 0 ROIs
+    display_prefixes = [p for p in sorted(supergroups) + sorted(extra_prefixes)
+                        if roi_count.get(p, 0) > 0]
     init_rows = []
     for i, pfx in enumerate(display_prefixes):
         grp = prefix_group.get(pfx, group_options[min(i, n_groups - 1)])
