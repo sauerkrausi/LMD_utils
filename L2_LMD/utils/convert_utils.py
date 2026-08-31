@@ -500,16 +500,29 @@ def render_convert_tab():
     st.session_state.t2_prefix_group = new_prefix_group
     st.session_state.t2_sg_alias_map = new_sg_alias_map
 
+    # Build sorted alias list (longest alias first) for prefix matching
+    _alias_lookup = sorted(new_sg_alias_map.items(), key=lambda x: -len(x[1]))
+
+    def _match_supergroup(roi_name):
+        """Return (group, sg_display) using longest-prefix match on user-defined aliases."""
+        auto_sg = roi_name.split("-")[0]
+        # 1. Exact match on original auto-detected key
+        if auto_sg in new_prefix_group:
+            return new_prefix_group[auto_sg], new_sg_alias_map.get(auto_sg, auto_sg)
+        # 2. Longest alias that is a prefix of the ROI name
+        for orig_key, alias in _alias_lookup:
+            if roi_name.startswith(alias) or roi_name.startswith(orig_key):
+                return new_prefix_group.get(orig_key, group_options[0]), alias
+        return group_options[0], auto_sg
+
     # Per-ROI fine-tuning — seeded from supergroup; key resets when bulk assignments change
     sg_hash = hash(frozenset(new_prefix_group.items()) | frozenset(new_sg_alias_map.items()) | frozenset([n_groups]))
     with st.expander("ROI-level assignment", expanded=True):
         st.caption("Pre-filled from supergroup above. Edit **Supergroup** or **Group** to override per ROI.")
         roi_rows = []
         for p in sorted(polygons, key=lambda x: x["name"]):
-            name    = p["name"]
-            auto_sg = name.split("-")[0]
-            sg_disp = new_sg_alias_map.get(auto_sg, auto_sg)   # user-defined label
-            grp     = new_prefix_group.get(auto_sg, group_options[0])
+            name         = p["name"]
+            grp, sg_disp = _match_supergroup(name)
             if grp not in group_options:
                 grp = group_options[0]
             roi_rows.append({"ROI": name, "Supergroup": sg_disp, "Group": grp})
