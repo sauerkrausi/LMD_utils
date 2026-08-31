@@ -434,7 +434,9 @@ def render_convert_tab():
         st.session_state.t2_extra_prefixes = []
         st.session_state.t2_prefix_group   = {sg: f"Group{i+1}" for i, sg in enumerate(supergroups)}
 
-    extra_prefixes = st.session_state.get("t2_extra_prefixes", [])
+    if "t2_extra_prefixes" not in st.session_state:
+        st.session_state.t2_extra_prefixes = []
+    extra_prefixes = st.session_state.t2_extra_prefixes
 
     # All prefixes sorted longest-first — longer prefix wins (greedy match)
     all_prefixes = sorted(set(supergroups) | set(extra_prefixes), key=lambda x: -len(x))
@@ -501,7 +503,6 @@ def render_convert_tab():
                 if _g not in _used:
                     st.session_state.t2_prefix_group[_p] = _g
                     break
-            st.rerun()
         elif _p in extra_prefixes or _p in supergroups:
             st.warning(f"Prefix '{_p}' already exists.")
 
@@ -515,7 +516,6 @@ def render_convert_tab():
                 if _p in st.session_state.t2_extra_prefixes:
                     st.session_state.t2_extra_prefixes.remove(_p)
                 st.session_state.t2_prefix_group.pop(_p, None)
-            st.rerun()
 
     # Per-ROI fine-tuning; table key resets when prefix assignments change
     sg_hash = hash(tuple(sorted(new_prefix_group.items())))
@@ -565,6 +565,7 @@ def render_convert_tab():
     plate_labels = get_plate_labels(well_map)
 
     # Show all plates in tabs
+    png_map    = {}
     plate_tabs = st.tabs(plate_labels)
     for tab, pl in zip(plate_tabs, plate_labels):
         with tab:
@@ -580,6 +581,7 @@ def render_convert_tab():
                     )
             with col_plate:
                 preview_png = plot_well_preview(pwm, f"{pl} — {n_in_plate} ROIs")
+                png_map[pl] = preview_png
                 st.image(preview_png, use_container_width=True)
                 st.download_button(
                     f"Download {pl} plate map",
@@ -588,6 +590,7 @@ def render_convert_tab():
                     mime="image/png",
                     key=f"dl_pm_{pl}",
                 )
+    st.session_state.t2_png_map = png_map
 
     # Cutting list — available immediately, no XML needed
     cutting_csv = build_cutting_list(well_map, groups_dict=st.session_state.get("t2_groups"))
@@ -618,18 +621,26 @@ def render_convert_tab():
         saw_bytes     = json.dumps(st.session_state.t2_saw, indent=2).encode("utf-8")
         plates_out    = st.session_state.t2_plates
 
-        # Download buttons: zip + individual plates + JSON
-        n_btns   = len(plates_out) + 2
-        dl_cols  = st.columns(n_btns)
+        # Download buttons: zip + individual plates (XML + PNG) + JSON
+        png_map_dl = st.session_state.get("t2_png_map", {})
+        n_btns     = len(plates_out) + 2
+        dl_cols    = st.columns(n_btns)
         dl_cols[0].download_button(
             "All plates (zip)", zip_bytes_dl,
             file_name=f"{stem_out}_lmd.zip", mime="application/zip", type="primary"
         )
         for i, (plate_label, xml_bytes) in enumerate(plates_out):
-            dl_cols[i + 1].download_button(
-                f"{plate_label}.xml", xml_bytes,
-                file_name=f"{stem_out}_{plate_label}.xml", mime="application/xml"
-            )
+            with dl_cols[i + 1]:
+                st.download_button(
+                    f"{plate_label}.xml", xml_bytes,
+                    file_name=f"{stem_out}_{plate_label}.xml", mime="application/xml"
+                )
+                if plate_label in png_map_dl:
+                    st.download_button(
+                        f"{plate_label} map (PNG)", png_map_dl[plate_label],
+                        file_name=f"{stem_out}_{plate_label}_platemap.png", mime="image/png",
+                        key=f"dl_pm_post_{plate_label}",
+                    )
         dl_cols[-1].download_button(
             "samples_and_wells.json", saw_bytes,
             file_name=f"{stem_out}_samples_and_wells.json", mime="application/json"

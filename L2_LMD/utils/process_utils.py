@@ -1,34 +1,27 @@
 """
 process_utils.py
 ================
-Tab 3 -- Process LMD Collection (multi-plate aware).
+Tab 3 -- Post-cutting QC (dropout editor + re-run XML generation).
 
-Input (piped from Tab 2 or uploaded as zip):
-  - t2_plates: [(plate_label, xml_bytes), ...]
-  - t2_saw:    {sample_name: "Plate1_A1"}  (or legacy {sample_name: "A1"})
+Input (piped from Tab 2 or CSV upload):
+  - t2_plates: [(plate_label, xml_bytes), ...]  -- original XMLs
+  - t2_saw:    {sample_name: "Plate1_A1"}       -- well assignments
+  - t2_stem:   str                              -- file stem
+  - t2_groups: {roi_name: group_label}          -- group assignments
 
-Steps per plate:
-  1. Sort samples alphabetically, assign new wells A1..H12
-  2. Sort XML shapes by new well, update CapID, inject TransferID
-  3. Generate 96-well plate CSV + plate map PNG
-  4. Generate sample list CSV (cut order, Plate, ROI, Well_ID, Dropout {Y/N}, comments, processed)
-
-Downloads: zip of all per-plate outputs + combined sample list
-Pipes to Tab 4: combined sample_list CSV bytes via session_state.t3_sample_list / t3_stem
+Outputs:
+  - Updated sample list CSV (with Dropout Y/N filled in)
+  - Dropout-free XMLs zip (original XMLs with dropout ROIs removed, for LMD re-run)
+  - Pipes t3_sample_list to Tab 4 (MS queue excludes dropouts automatically)
 """
 
 import io
-import json
 import csv
+import json
 import re
 import zipfile
 import xml.etree.ElementTree as ET
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-import matplotlib.cm as cm
 import pandas as pd
 import streamlit as st
 
@@ -50,418 +43,125 @@ def well_sort_key(well_str):
         return (99, 99)
 
 
-def indent_xml(elem, level=0):
-    pad = "\n" + "  " * level
-    if len(elem):
-        if not elem.text or not elem.text.strip():
-            elem.text = pad + "  "
-        if not elem.tail or not elem.tail.strip():
-            elem.tail = pad
-        for child in elem:
-            indent_xml(child, level + 1)
-        if not child.tail or not child.tail.strip():
-            child.tail = pad
-    else:
-        if level and (not elem.tail or not elem.tail.strip()):
-            elem.tail = pad
-    if not level:
-        elem.tail = "\n"
-
-
 def _split_saw_by_plate(saw_dict: dict) -> dict:
-    """
-    Split {name: 'Plate1_A1'} into {'Plate1': {name: 'A1'}, 'Plate2': {name: 'A1'}, ...}.
-    Falls back to single plate if values have no Plate prefix.
-    """
-    is_multi = any(
-        re.match(r'^Plate\d+_', v) for v in saw_dict.values()
-    )
+    """Split {name: 'Plate1_A1'} into {'Plate1': {name: 'A1'}, ...}."""
+    is_multi = any(re.match(r'^Plate\d+_', v) for v in saw_dict.values())
     if not is_multi:
         return {"Plate1": saw_dict}
     result = {}
     for name, full_well in saw_dict.items():
         m = re.match(r'^(Plate\d+)_(.+)$', full_well)
         if m:
-            plate_label, well = m.group(1), m.group(2)
-            result.setdefault(plate_label, {})[name] = well
+            result.setdefault(m.group(1), {})[name] = m.group(2)
         else:
             result.setdefault("Plate1", {})[name] = full_well
     return result
 
 
-# ============================================================
-# CORE LOGIC (single plate)
-# ============================================================
-def process_collection(xml_bytes: bytes, saw_dict: dict, stem: str) -> dict:
-    """
-    All in-memory. saw_dict: {sample_name: well_id} with plain wells (no Plate prefix).
-    Returns dict with output bytes, grid, metadata.
-    """
-    warnings = []
-
-    orig_well_to_sample = {v: k for k, v in saw_dict.items()}
-    all_samples_alpha   = sorted(saw_dict.keys(), key=str.casefold)
-
-    existing_wells = sorted(saw_dict.values(), key=well_sort_key)
-    start_well     = existing_wells[0] if existing_wells else "A1"
-    start_idx      = WELLS_96.index(start_well) if start_well in WELLS_96 else 0
-
-    if start_idx > 0:
-        warnings.append(f"Custom start position: wells assigned from {start_well}.")
-
-    available = 96 - start_idx
-    if len(all_samples_alpha) > available:
-        warnings.append(f"{len(all_samples_alpha)} samples exceed available wells from "
-                        f"{start_well} ({available} slots); extras omitted.")
-
-    sample_to_new_well = {
-        s: WELLS_96[start_idx + i]
-        for i, s in enumerate(all_samples_alpha)
-        if start_idx + i < 96
-    }
-
-    # Parse + sort XML
-    tree      = ET.parse(io.StringIO(xml_bytes.decode("utf-8-sig")))
-    root      = tree.getroot()
-    shape_pat = re.compile(r'^Shape_\d+$')
-    shapes    = [el for el in root if shape_pat.match(el.tag)]
-    non_shapes = [el for el in root if not shape_pat.match(el.tag)]
-
-    def shape_key(el):
-        cap    = el.find("CapID")
-        orig   = cap.text.strip() if cap is not None and cap.text else ""
-        sample = orig_well_to_sample.get(orig, "")
-        return well_sort_key(sample_to_new_well.get(sample, "Z99"))
-
-    shapes_sorted = sorted(shapes, key=shape_key)
-
-    for el in list(root):
-        root.remove(el)
-    for el in non_shapes:
-        root.append(el)
-
-    sc = root.find("ShapeCount")
-    if sc is not None:
-        sc.text = str(len(shapes_sorted))
-
-    for new_idx, el in enumerate(shapes_sorted, start=1):
-        el.tag      = f"Shape_{new_idx}"
-        cap_el      = el.find("CapID")
-        orig_cap    = cap_el.text.strip() if cap_el is not None and cap_el.text else ""
-        sample_name = orig_well_to_sample.get(orig_cap, "")
-        new_well    = sample_to_new_well.get(sample_name, "")
-
-        if cap_el is not None:
-            cap_el.text = new_well
-
-        existing_tid = el.find("TransferID")
-        if existing_tid is not None:
-            existing_tid.text = sample_name
-        else:
-            children    = list(el)
-            cap_pos     = children.index(cap_el) if cap_el is not None else 0
-            transfer_el = ET.Element("TransferID")
-            transfer_el.text = sample_name
-            el.insert(cap_pos + 1, transfer_el)
-        root.append(el)
-
-    indent_xml(root)
-    xml_buf = io.BytesIO()
-    tree.write(xml_buf, encoding="UTF-8", xml_declaration=True)
-
-    # 96-well plate grid + CSV
-    grid = {r: {c: "" for c in COLS} for r in ROWS}
-    for sample, well in sample_to_new_well.items():
-        grid[well[0]][int(well[1:])] = sample
-
-    wellplate_buf = io.StringIO()
-    w = csv.writer(wellplate_buf)
-    w.writerow([""] + COLS)
-    for r in ROWS:
-        w.writerow([r] + [grid[r][c] for c in COLS])
-
-    # Sample list rows (no plate column here; caller adds it)
-    sample_rows = []
-    for roi_num, el in enumerate(shapes_sorted, start=1):
-        t_el   = el.find("TransferID")
-        c_el   = el.find("CapID")
-        sample = t_el.text if t_el is not None and t_el.text else ""
-        well   = c_el.text if c_el is not None and c_el.text else ""
-        sample_rows.append([roi_num, sample, well, "", "", ""])
-
-    updated_json = json.dumps(sample_to_new_well, indent=4, ensure_ascii=False).encode("utf-8")
-
-    return {
-        "sorted_xml":    xml_buf.getvalue(),
-        "wellplate_csv": wellplate_buf.getvalue().encode("utf-8"),
-        "sample_rows":   sample_rows,
-        "updated_json":  updated_json,
-        "grid":          grid,
-        "n_rois":        len(shapes_sorted),
-        "n_samples":     len(all_samples_alpha),
-        "warnings":      warnings,
-        "stem":          stem,
-    }
-
-
-def process_all_plates(plates: list, saw_dict: dict, stem: str) -> dict:
-    """
-    plates: [(plate_label, xml_bytes), ...]
-    saw_dict: {name: 'Plate1_A1'} or {name: 'A1'} (single-plate legacy)
-    Returns combined results dict.
-    """
-    per_plate_saw = _split_saw_by_plate(saw_dict)
-    all_results   = {}
-
-    for plate_label, xml_bytes in plates:
-        plate_saw = per_plate_saw.get(plate_label, {})
-        if not plate_saw:
-            continue
-        r = process_collection(xml_bytes, plate_saw, f"{stem}_{plate_label}")
-        all_results[plate_label] = r
-
-    return all_results
-
-
-def plot_plate_png(grid: dict, title: str) -> bytes:
-    """Outer ring = supergroup (first hyphen segment); fill = group (underscore prefix)."""
-    all_labels  = sorted({grid[r][c] for r in ROWS for c in COLS if grid[r][c]})
-    groups      = sorted({l.split("_")[0] for l in all_labels})
-    palette     = cm.tab20
-    group_color = {g: palette(i / max(len(groups), 1)) for i, g in enumerate(groups)}
-
-    supergroups = sorted({l.split("-")[0] for l in all_labels})
-    sg_palette  = cm.tab10
-    sg_color    = {sg: sg_palette(i / max(len(supergroups), 1))
-                   for i, sg in enumerate(supergroups)}
-
-    fig, ax = plt.subplots(figsize=(14, 7))
-    ax.set_xlim(-0.8, 12.5)
-    ax.set_ylim(-0.5, 8.5)
-    ax.set_aspect("equal")
-    ax.axis("off")
-    ax.set_title(title, fontsize=13, fontweight="bold", pad=10)
-
-    for r_idx, r in enumerate(ROWS):
-        for c_idx, c in enumerate(COLS):
-            x     = c_idx
-            y     = 7 - r_idx
-            label = grid[r][c]
-            grp   = label.split("_")[0] if label else ""
-            sg    = label.split("-")[0] if label else ""
-            if label:
-                ax.add_patch(plt.Circle((x, y), 0.46, color=sg_color.get(sg, "whitesmoke"),
-                                        ec="none", zorder=1))
-                color = group_color.get(grp, "whitesmoke")
-                ax.add_patch(plt.Circle((x, y), 0.36, color=color, ec="#333333", lw=0.7, zorder=2))
-                ax.text(x, y, label.replace("_", "\n"), ha="center", va="center",
-                        fontsize=4, zorder=3, color="black")
-            else:
-                ax.add_patch(plt.Circle((x, y), 0.42, color="whitesmoke",
-                                        ec="#999999", lw=0.7, zorder=2))
-
-    for r_idx, r in enumerate(ROWS):
-        ax.text(-0.65, 7 - r_idx, r, ha="right", va="center", fontsize=9, fontweight="bold")
-    for c_idx, c in enumerate(COLS):
-        ax.text(c_idx, 8.0, str(c), ha="center", va="bottom", fontsize=9, fontweight="bold")
-
-    sg_patches  = [mpatches.Patch(color=sg_color[sg], label=sg) for sg in supergroups]
-    grp_patches = [mpatches.Patch(color=group_color[g], label=g) for g in groups]
-    if sg_patches:
-        leg1 = ax.legend(handles=sg_patches, bbox_to_anchor=(1.01, 1), loc="upper left",
-                         fontsize=6, title="Supergroup", title_fontsize=7)
-        ax.add_artist(leg1)
-    if grp_patches:
-        ax.legend(handles=grp_patches, bbox_to_anchor=(1.01, 0.5), loc="upper left",
-                  fontsize=5, title="Group", title_fontsize=6)
-
-    plt.tight_layout()
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    return buf.getvalue()
-
-
-def build_combined_sample_list(all_results: dict, groups_dict: dict = None) -> bytes:
-    """Combine per-plate sample rows into one CSV with Plate and Group columns."""
+def build_sample_list_from_t2(saw_dict: dict, groups_dict: dict, stem: str) -> bytes:
+    """Build sample list CSV directly from Tab 2 well assignments."""
+    per_plate = _split_saw_by_plate(saw_dict)
     buf = io.StringIO()
-    w   = csv.writer(buf)
+    w = csv.writer(buf)
     w.writerow(["Plate", "cut order", "ROI", "Well_ID", "Group",
                 "Dropout {Y/N}", "comments", "processed"])
-    for plate_label in sorted(all_results.keys()):
-        for row in all_results[plate_label]["sample_rows"]:
-            # row: [cut_order, roi, well, dropout, comments, processed]
-            roi = row[1]
+    for plate in sorted(per_plate.keys()):
+        pairs = sorted(per_plate[plate].items(), key=lambda x: well_sort_key(x[1]))
+        for i, (roi, well) in enumerate(pairs, start=1):
             grp = (groups_dict or {}).get(roi, roi.split("-")[0] if "-" in roi else roi)
-            w.writerow([plate_label, row[0], roi, row[2], grp, row[3], row[4], row[5]])
+            w.writerow([plate, i, roi, well, grp, "", "", ""])
     return buf.getvalue().encode("utf-8")
 
 
-def build_multi_zip(all_results: dict, png_map: dict, stem: str,
-                    groups_dict: dict = None) -> bytes:
-    """Package all per-plate outputs into one zip."""
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        for plate_label, r in all_results.items():
-            ps = f"{stem}_{plate_label}"
-            z.writestr(f"{ps}_sorted.xml",       r["sorted_xml"])
-            z.writestr(f"{ps}_96wellplate.csv",  r["wellplate_csv"])
-            z.writestr(f"{ps}_updated_saw.json", r["updated_json"])
-            if plate_label in png_map:
-                z.writestr(f"{ps}_platemap.png", png_map[plate_label])
-        combined_csv = build_combined_sample_list(all_results, groups_dict=groups_dict)
-        z.writestr(f"{stem}_sample_list.csv", combined_csv)
-    return buf.getvalue()
+def build_dropout_free_xmls(plates: list, dropout_rois: set) -> list:
+    """Remove dropout ROIs from each plate XML. Returns [(label, xml_bytes), ...]."""
+    results = []
+    shape_pat = re.compile(r'^Shape_\d+$')
+
+    for plate_label, xml_bytes in plates:
+        tree = ET.parse(io.StringIO(xml_bytes.decode("utf-8-sig")))
+        root = tree.getroot()
+
+        shapes     = [el for el in root if shape_pat.match(el.tag)]
+        non_shapes = [el for el in root if not shape_pat.match(el.tag)]
+
+        # Keep non-dropout shapes only
+        kept = []
+        for el in shapes:
+            t_el = el.find("TransferID")
+            roi  = (t_el.text or "").strip() if t_el is not None else ""
+            if roi not in dropout_rois:
+                kept.append(el)
+
+        # Rebuild root
+        for el in list(root):
+            root.remove(el)
+        for el in non_shapes:
+            root.append(el)
+
+        sc = root.find("ShapeCount")
+        if sc is not None:
+            sc.text = str(len(kept))
+
+        for i, el in enumerate(kept, start=1):
+            el.tag = f"Shape_{i}"
+            root.append(el)
+
+        buf = io.BytesIO()
+        tree.write(buf, encoding="UTF-8", xml_declaration=True)
+        results.append((plate_label, buf.getvalue()))
+
+    return results
 
 
 # ============================================================
 # STREAMLIT TAB
 # ============================================================
 def render_process_tab():
-    st.header("Process LMD Collection")
+    st.header("Post-Cutting QC")
     st.caption(
-        "Sorts ROIs alphabetically per plate, assigns wells A1..H12, updates XML CapID, "
-        "generates plate maps and sample list. "
-        "Accepts output piped from Tab 2 or a zip upload."
+        "Mark dropout ROIs after stereomicroscope inspection. "
+        "Downloads updated sample list and dropout-free XMLs for LMD re-runs on fresh sections."
     )
 
-    # Source: piped from Tab 2 or zip upload
-    t2_plates = st.session_state.get("t2_plates")   # [(plate_label, xml_bytes)]
-    t2_saw    = st.session_state.get("t2_saw")       # {name: "Plate1_A1"} or {name: "A1"}
-    t2_stem   = st.session_state.get("t2_stem")
+    t2_plates = st.session_state.get("t2_plates")
+    t2_saw    = st.session_state.get("t2_saw")
+    t2_stem   = st.session_state.get("t2_stem", "collection")
+    t2_groups = st.session_state.get("t2_groups", {})
 
-    # Backward compat: old Tab 2 set t2_xml (single bytes) instead of t2_plates
+    # Backward compat: old single-XML key
     if t2_plates is None and st.session_state.get("t2_xml") is not None:
         t2_plates = [("Plate1", st.session_state.t2_xml)]
 
-    source = None
-    uploaded_zip = st.file_uploader(
-        "Upload collection zip (from Tab 2 download)",
-        type=["zip"], key="proc_upload"
+    uploaded_csv = st.file_uploader(
+        "Upload sample list CSV (optional — overrides Tab 2 pipe)",
+        type=["csv"], key="proc_upload_csv"
     )
 
-    if uploaded_zip is not None:
-        source = "zip"
-    elif t2_plates is not None and t2_saw is not None:
-        st.info(f"Using {len(t2_plates)} plate(s) piped from Tab 2.")
-        source = "pipe"
-
-    if source is None:
-        st.info("Convert GeoJSON in Tab 2 first, or upload a zip here.")
+    # Resolve sample list source
+    if uploaded_csv is not None:
+        raw_csv = uploaded_csv.getvalue()
+        stem    = uploaded_csv.name.replace("_sample_list.csv", "").replace(".csv", "")
+        st.session_state.t3_sample_list = raw_csv
+        st.session_state.t3_stem        = stem
+    elif st.session_state.get("t3_sample_list") is not None:
+        raw_csv = st.session_state.t3_sample_list
+        stem    = st.session_state.get("t3_stem", t2_stem)
+        st.info("Using sample list piped from Tab 2.")
+    elif t2_saw is not None:
+        raw_csv = build_sample_list_from_t2(t2_saw, t2_groups, t2_stem)
+        stem    = t2_stem
+        st.session_state.t3_sample_list = raw_csv
+        st.session_state.t3_stem        = stem
+        st.info("Sample list built from Tab 2 well assignments.")
+    else:
+        st.info("Complete Tab 2 first, or upload a sample list CSV here.")
         st.stop()
 
-    # Extract plates + saw
-    if source == "pipe":
-        plates   = t2_plates
-        saw_dict = t2_saw
-        stem     = t2_stem or "collection"
-    else:
-        with zipfile.ZipFile(uploaded_zip) as z:
-            names      = z.namelist()
-            xml_names  = sorted([
-                n for n in names if n.endswith(".xml")
-                and "_sorted" not in n and not n.startswith("__MACOSX")
-            ])
-            json_names = [n for n in names if n.endswith("samples_and_wells.json")]
-
-        if not xml_names:
-            st.error("No XML file(s) found in zip.")
-            return
-        if not json_names:
-            st.error("samples_and_wells.json not found in zip.")
-            return
-
-        with zipfile.ZipFile(uploaded_zip) as z:
-            saw_dict = json.loads(z.read(json_names[0]).decode("utf-8"))
-            plates   = []
-            for xn in xml_names:
-                # Try to extract plate label from filename e.g. stem_Plate1.xml
-                m = re.search(r'(Plate\d+)\.xml$', xn, re.IGNORECASE)
-                label = m.group(1) if m else xn.replace(".xml", "").split("/")[-1]
-                plates.append((label, z.read(xn)))
-
-        stem = xml_names[0].split("/")[-1].replace(".xml", "").rsplit("_", 1)[0]
-
-    # Cache key
-    input_key = (stem, len(plates), len(saw_dict))
-    if st.session_state.get("proc_last_key") != input_key:
-        st.session_state.proc_all_results = None
-        st.session_state.proc_last_key    = input_key
-
-    c1, c2 = st.columns(2)
-    c1.metric("Samples in JSON", len(saw_dict))
-    c2.metric("Plates", len(plates))
-
-    if st.button("Process all plates", type="primary"):
-        groups_dict = st.session_state.get("t2_groups")
-        with st.spinner(f"Processing {len(plates)} plate(s)..."):
-            all_results  = process_all_plates(plates, saw_dict, stem)
-            png_map      = {pl: plot_plate_png(r["grid"], f"{pl} — well assignment")
-                            for pl, r in all_results.items()}
-            combined_csv = build_combined_sample_list(all_results, groups_dict=groups_dict)
-            zip_bytes    = build_multi_zip(all_results, png_map, stem, groups_dict=groups_dict)
-
-        st.session_state.proc_all_results = all_results
-        st.session_state.proc_png_map     = png_map
-        st.session_state.proc_combined    = combined_csv
-        st.session_state.proc_zip         = zip_bytes
-        st.session_state.proc_last_key    = input_key
-        st.session_state.t3_sample_list   = combined_csv
-        st.session_state.t3_stem          = stem
-
-        total_rois = sum(r["n_rois"] for r in all_results.values())
-        st.success(f"{total_rois} ROIs processed across {len(all_results)} plate(s).")
-
-    all_results = st.session_state.get("proc_all_results")
-    if not all_results:
-        return
-
-    # Warnings
-    for pl, r in all_results.items():
-        for w in r["warnings"]:
-            st.warning(f"{pl}: {w}")
-
-    # Plate selector
-    plate_labels = sorted(all_results.keys())
-    sel_plate    = st.selectbox("View plate", plate_labels, key="proc_plate_sel")
-    result       = all_results[sel_plate]
-    png_map      = st.session_state.get("proc_png_map", {})
-
-    st.subheader(f"{sel_plate} — 96-well layout")
-    if sel_plate in png_map:
-        st.image(png_map[sel_plate], use_container_width=True)
-
-    st.subheader("Downloads")
-    stem_out = stem
-
-    dl0, dl1, dl2, dl3 = st.columns(4)
-    dl0.download_button("All plates (zip)", st.session_state.proc_zip,
-                        file_name=f"{stem_out}_lmd_outputs.zip",
-                        mime="application/zip", type="primary")
-    dl1.download_button(f"{sel_plate} sorted XML", result["sorted_xml"],
-                        file_name=f"{stem_out}_{sel_plate}_sorted.xml", mime="application/xml")
-    dl2.download_button(f"{sel_plate} 96-well CSV", result["wellplate_csv"],
-                        file_name=f"{stem_out}_{sel_plate}_96wellplate.csv", mime="text/csv")
-    dl3.download_button("Combined sample list", st.session_state.proc_combined,
-                        file_name=f"{stem_out}_sample_list.csv", mime="text/csv")
-
-    # --------------------------------------------------------
-    # DROPOUT EDITOR
-    # --------------------------------------------------------
-    st.divider()
-    st.subheader("Stereomicroscope QC — Mark Dropouts")
-    st.caption(
-        "After inspecting plates under the stereomicroscope, "
-        "tick Dropout for any failed wells. "
-        "Dropouts are excluded from the MS queue. "
-        "Alternatively, upload an updated sample list CSV."
-    )
-
-    raw_csv = st.session_state.get("t3_sample_list") or st.session_state.get("proc_combined")
-    df      = pd.read_csv(io.BytesIO(raw_csv))
-    df.columns = [c.strip() for c in df.columns]
-
-    dropout_col = "Dropout {Y/N}"
+    # Parse
+    df = pd.read_csv(io.BytesIO(raw_csv))
+    df.columns     = [c.strip() for c in df.columns]
+    dropout_col    = "Dropout {Y/N}"
     if dropout_col not in df.columns:
         df[dropout_col] = False
     else:
@@ -469,51 +169,65 @@ def render_process_tab():
             lambda v: True if str(v).strip().upper() == "Y" else False
         )
 
-    # Filter to selected plate for display
-    if "Plate" in df.columns:
-        df_view = df[df["Plate"] == sel_plate].copy()
-    else:
-        df_view = df.copy()
+    n_rois = len(df)
+    n_plates = df["Plate"].nunique() if "Plate" in df.columns else 1
 
-    edited_df_view = st.data_editor(
-        df_view,
+    st.subheader("Dropout Editor")
+    st.caption(f"{n_rois} ROIs across {n_plates} plate(s). Check **Dropout?** for any failed wells.")
+
+    edited_df = st.data_editor(
+        df,
         column_config={dropout_col: st.column_config.CheckboxColumn("Dropout?", default=False)},
-        disabled=[c for c in df_view.columns if c != dropout_col],
+        disabled=[c for c in df.columns if c != dropout_col],
         hide_index=True,
         use_container_width=True,
-        key=f"proc_dropout_editor_{sel_plate}",
+        key="proc_dropout_editor",
     )
 
-    updated_upload = st.file_uploader(
-        "Or upload updated sample list CSV", type=["csv"], key="proc_updated_csv"
+    n_dropouts = int(edited_df[dropout_col].sum())
+    if n_dropouts:
+        st.warning(f"{n_dropouts} dropout(s) marked — these will be excluded from the MS queue and re-run XMLs.")
+    else:
+        st.success("No dropouts marked.")
+
+    st.divider()
+
+    # Build updated CSV (Y/N strings for export)
+    export_df              = edited_df.copy()
+    export_df[dropout_col] = export_df[dropout_col].apply(lambda v: "Y" if v else "")
+    out_buf                = io.StringIO()
+    export_df.to_csv(out_buf, index=False)
+    updated_csv = out_buf.getvalue().encode("utf-8")
+
+    # Always pipe latest to Tab 4
+    st.session_state.t3_sample_list = updated_csv
+    st.session_state.t3_stem        = stem
+
+    dl1, dl2 = st.columns(2)
+    dl1.download_button(
+        "Download sample list (CSV)", updated_csv,
+        file_name=f"{stem}_sample_list.csv", mime="text/csv",
     )
 
-    apply_col, dl_col = st.columns([1, 1])
+    # Dropout-free re-run XMLs
+    if t2_plates is not None and n_dropouts > 0:
+        dropout_rois = set(
+            edited_df.loc[edited_df[dropout_col].astype(bool), "ROI"].astype(str)
+        )
+        rerun_xmls = build_dropout_free_xmls(t2_plates, dropout_rois)
 
-    if apply_col.button("Apply dropout changes", type="primary", key="proc_apply_dropout"):
-        if updated_upload is not None:
-            updated_csv = updated_upload.getvalue()
-        else:
-            # Merge edited plate rows back into full df
-            if "Plate" in df.columns:
-                df.loc[df["Plate"] == sel_plate, dropout_col] = edited_df_view[dropout_col].values
-            else:
-                df[dropout_col] = edited_df_view[dropout_col].values
-            df[dropout_col] = df[dropout_col].apply(lambda v: "Y" if v else "")
-            buf = io.StringIO()
-            df.to_csv(buf, index=False)
-            updated_csv = buf.getvalue().encode("utf-8")
+        rerun_buf = io.BytesIO()
+        with zipfile.ZipFile(rerun_buf, "w", zipfile.ZIP_DEFLATED) as z:
+            for plate_label, xml_bytes in rerun_xmls:
+                z.writestr(f"{stem}_{plate_label}_rerun.xml", xml_bytes)
+        dl2.download_button(
+            "Download re-run XMLs (zip)", rerun_buf.getvalue(),
+            file_name=f"{stem}_rerun.zip", mime="application/zip",
+            type="primary",
+        )
+    elif n_dropouts == 0:
+        dl2.caption("No dropouts — no re-run XML needed.")
+    else:
+        dl2.caption("Complete Tab 2 to enable re-run XML generation.")
 
-        st.session_state.t3_sample_list = updated_csv
-        n_drop = pd.read_csv(io.BytesIO(updated_csv))[dropout_col].apply(
-            lambda v: str(v).strip().upper() == "Y"
-        ).sum()
-        st.success(f"Dropout list updated — {int(n_drop)} dropout(s). Tab 4 will exclude these.")
-
-    current_csv = st.session_state.get("t3_sample_list") or raw_csv
-    dl_col.download_button(
-        "Download updated sample list", current_csv,
-        file_name=f"{stem_out}_sample_list.csv", mime="text/csv",
-    )
-
-    st.caption("Tab 4 (MS Queue) uses this sample list — apply dropout changes before generating the queue.")
+    st.caption("Tab 4 (MS Queue) reads this sample list and automatically excludes dropout ROIs.")
