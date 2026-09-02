@@ -726,6 +726,15 @@ def render_ms_queue_tab():
     ]
     group_df = pd.DataFrame(init_data)
 
+    # Group size summary
+    group_counts = {}
+    for row in init_data:
+        g = row["Group"]
+        group_counts[g] = group_counts.get(g, 0) + 1
+    gcols = st.columns(max(len(group_counts), 1))
+    for i, (g, n) in enumerate(sorted(group_counts.items())):
+        gcols[i].metric(g, f"{n} ROIs")
+
     edited_df = st.data_editor(
         group_df,
         column_config={
