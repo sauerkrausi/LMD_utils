@@ -735,6 +735,23 @@ def render_ms_queue_tab():
     for i, (g, n) in enumerate(sorted(group_counts.items())):
         gcols[i].metric(g, f"{n} ROIs")
 
+    # Divide group helper
+    _sp1, _sp2, _sp3 = st.columns([2, 1, 1])
+    split_grp = _sp1.selectbox("Divide group", sorted(group_counts.keys()),
+                                key="msq_split_grp", label_visibility="visible")
+    split_n   = _sp2.number_input("Into N parts", min_value=2, max_value=20, value=2, step=1,
+                                   key="msq_split_n", label_visibility="visible")
+    if _sp3.button("Divide", key="msq_split_btn", use_container_width=True):
+        rois_in_grp = [row["ROI"] for row in init_data if row["Group"] == split_grp]
+        n_parts     = int(split_n)
+        chunk       = math.ceil(len(rois_in_grp) / n_parts)
+        updated     = {row["ROI"]: row["Group"] for row in init_data}
+        for i, roi in enumerate(rois_in_grp):
+            suffix = chr(ord('a') + i // chunk)   # a, b, c ...
+            updated[roi] = f"{split_grp}{suffix}"
+        st.session_state.msq_group_assignments = updated
+        st.session_state.msq_results           = None
+
     edited_df = st.data_editor(
         group_df,
         column_config={
