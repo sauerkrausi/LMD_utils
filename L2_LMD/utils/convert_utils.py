@@ -51,6 +51,18 @@ ROWS_384      = list("ABCDEFGHIJKLMNOP")
 ALL_WELLS_384 = [f"{r}{c}" for r in ROWS_384 for c in range(1, 25)]  # A1 .. P24 (384-well)
 
 
+def get_available_wells_384(margin: int = 1, space_rows: int = 1, space_cols: int = 1) -> list:
+    """Return usable 384-well list after applying margin and row/column step.
+    margin: number of border rows/columns to leave empty on each side.
+    space_rows/cols: step between used rows/columns (1=consecutive, 2=every other, etc.).
+    """
+    avail_rows = ROWS_384[margin : len(ROWS_384) - margin] if margin else ROWS_384
+    avail_cols = list(range(1, 25))[margin : 24 - margin]  if margin else list(range(1, 25))
+    used_rows  = avail_rows[::max(1, space_rows)]
+    used_cols  = avail_cols[::max(1, space_cols)]
+    return [f"{r}{c}" for r in used_rows for c in used_cols]
+
+
 # ============================================================
 # CORE LOGIC
 # ============================================================
@@ -96,14 +108,18 @@ def count_inside_triangle(calib_pts: np.ndarray, polygons: list):
 
 def assign_wells(polygons: list, randomize: bool = False, seed: int = 42,
                  balance: bool = False, groups_dict: dict = None,
-                 plate_type: str = "96") -> dict:
+                 plate_type: str = "96", well_list: list = None) -> dict:
     """Returns {name: 'Plate1_A1'} across as many plates as needed.
-    plate_type: '96' (default) or '384'.
-    balance=True: group-aware bin-packing keeps sample groups on the same plate."""
+    plate_type: '96' or '384'. well_list overrides the default well sequence."""
     import math
     from collections import defaultdict
 
-    wells    = ALL_WELLS if plate_type == "96" else ALL_WELLS_384
+    if well_list is not None:
+        wells = well_list
+    elif plate_type == "384":
+        wells = ALL_WELLS_384
+    else:
+        wells = ALL_WELLS
     capacity = len(wells)
 
     names    = sorted(set(p["name"] for p in polygons))
@@ -245,7 +261,8 @@ def build_xml_zip(plate_xml_list: list, well_map: dict, stem: str) -> bytes:
 # ============================================================
 # 96-WELL PLATE PREVIEW
 # ============================================================
-def plot_well_preview(well_map: dict, title: str, plate_type: str = "96") -> bytes:
+def plot_well_preview(well_map: dict, title: str, plate_type: str = "96",
+                      available_wells: set = None) -> bytes:
     """well_map: {name: 'A1'} for a single plate.
     plate_type: '96' or '384'.
     Outer ring = supergroup (first hyphen segment); fill = group (underscore prefix)."""
@@ -300,8 +317,13 @@ def plot_well_preview(well_map: dict, title: str, plate_type: str = "96") -> byt
                 ax.text(x, y, name.replace("_", "\n"), ha="center", va="center",
                         fontsize=fsize_label, zorder=3, color="black")
             else:
+                # margin/skipped wells shown darker to distinguish from available-empty wells
+                if available_wells is not None and well not in available_wells:
+                    ec_col, fc_col = "#cccccc", "#eeeeee"
+                else:
+                    ec_col, fc_col = "#999999", "whitesmoke"
                 ax.add_patch(plt.Circle((x, y), inner_r + (outer_r - inner_r) / 2,
-                                        color="whitesmoke", ec="#999999", lw=0.5, zorder=2))
+                                        color=fc_col, ec=ec_col, lw=0.5, zorder=2))
 
     x_off = -0.6 if is_384 else -0.65
     y_top = n_rows - 0.05
@@ -578,7 +600,6 @@ def render_convert_tab():
     plate_type = opt_cols[0].selectbox("Plate format", ["96-well", "384-well"], index=0,
                                        key="t2_plate_type")
     plate_type_key = "96" if plate_type == "96-well" else "384"
-    capacity   = 96 if plate_type_key == "96" else 384
     randomize  = opt_cols[1].checkbox("Randomize well order", value=False)
     balance    = opt_cols[2].checkbox(
         "Balance samples across plates", value=True,
@@ -588,9 +609,26 @@ def render_convert_tab():
     if randomize:
         seed = int(st.number_input("Random seed", value=42, step=1, key="rand_seed"))
 
+    # 384-well layout controls
+    well_list_384 = None
+    if plate_type_key == "384":
+        _m, _sr, _sc = st.columns(3)
+        margin_384     = _m.number_input("Margin",             min_value=0, max_value=5,
+                                         value=1, step=1, key="t2_margin_384",
+                                         help="Border rows/columns to leave empty on each side (Coscia Lab recommends 2 for 384-well).")
+        space_rows_384 = _sr.number_input("Space between rows",    min_value=1, max_value=4,
+                                          value=1, step=1, key="t2_srows_384",
+                                          help="Row step size (1=consecutive, 2=every other row).")
+        space_cols_384 = _sc.number_input("Space between columns", min_value=1, max_value=4,
+                                          value=1, step=1, key="t2_scols_384",
+                                          help="Column step size (1=consecutive, 2=every other column).")
+        well_list_384 = get_available_wells_384(int(margin_384), int(space_rows_384), int(space_cols_384))
+        st.caption(f"{len(well_list_384)} wells available after margin/spacing filter.")
+
     well_map     = assign_wells(polygons, randomize=randomize, seed=seed, balance=balance,
                                 groups_dict=st.session_state.get("t2_groups"),
-                                plate_type=plate_type_key)
+                                plate_type=plate_type_key,
+                                well_list=well_list_384)
     plate_labels = get_plate_labels(well_map)
 
     # Show all plates in tabs
@@ -610,7 +648,8 @@ def render_convert_tab():
                     )
             with col_plate:
                 preview_png = plot_well_preview(pwm, f"{pl} — {n_in_plate} ROIs",
-                                               plate_type=plate_type_key)
+                                               plate_type=plate_type_key,
+                                               available_wells=set(well_list_384) if well_list_384 else None)
                 png_map[pl] = preview_png
                 st.image(preview_png, use_container_width=True)
                 st.download_button(
