@@ -9,7 +9,7 @@ The primary tool is the **L2-LMD integrated app** (`L2_LMD/`), which covers the 
 
 ---
 
-## L2-LMD — Integrated App (`L2_LMD/`)
+## L2-LMD - Integrated App (`L2_LMD/`)
 
 **Run locally:**
 ```bash
@@ -18,7 +18,7 @@ pip install -r requirements.txt
 streamlit run L2_LMD_app.py
 ```
 
-### Tab 1 — Reclassify GeoJSON
+### Tab 1: Reclassify GeoJSON
 Copies `properties.name` into `properties.classification.name` for each QuPath annotation.
 Required if annotations were drawn without a class assigned. Can be skipped via toggle if annotations are already classified.
 
@@ -27,7 +27,7 @@ Required if annotations were drawn without a class assigned. Can be skipped via 
 
 ---
 
-### Tab 2 — Convert to LMD XML
+### Tab 2: Convert to LMD XML
 Converts reclassified GeoJSON to LMD XML using [py-lmd](https://github.com/MannLabs/py-lmd) (MannLabs, Apache-2.0).
 
 - Select 3 calibration points; coverage check confirms ROI centroids lie within the calibration triangle
@@ -42,7 +42,7 @@ Converts reclassified GeoJSON to LMD XML using [py-lmd](https://github.com/MannL
 
 ---
 
-### Tab 3 — Post-Cutting QC
+### Tab 3: Post-Cutting QC
 Mark dropout ROIs after stereomicroscope inspection. Dropout ROIs are excluded from the MS queue and from re-run XMLs.
 
 **Input:** Sample list piped from Tab 2 (or CSV upload)
@@ -50,7 +50,7 @@ Mark dropout ROIs after stereomicroscope inspection. Dropout ROIs are excluded f
 
 ---
 
-### Tab 4 — MS Sample Queue
+### Tab 4: MS Sample Queue
 Generates the Bruker timsTOF instrument queue. Run groups re-indexed from 1 after dropout removal.
 
 - K562, Supermix, Blank controls with configurable loads and spare vials (max(3, 10%) per type)
@@ -63,7 +63,7 @@ Generates the Bruker timsTOF instrument queue. Run groups re-indexed from 1 afte
 
 ---
 
-## L2 MS Queue — Standalone App (`L2_msQ/`)
+## L2 MS Queue: Standalone App (`L2_msQ/`)
 
 Lightweight standalone queue generator. No GeoJSON or XML required.
 
