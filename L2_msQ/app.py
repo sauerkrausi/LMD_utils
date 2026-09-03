@@ -1,12 +1,12 @@
 """
-L2 MS Queue — standalone app
+L2 MS Queue
 =============================
 Input:  CSV with at minimum columns: sample_name, well
         (well in 96-well format, e.g. A1 .. H12)
 Output: Bruker timsTOF queue XLSX + plate map PNGs (zip)
 
 Run:
-    cd L2_msqueue
+    cd L2_msQ
     pip install -r requirements.txt
     streamlit run app.py
 """
