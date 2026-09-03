@@ -270,6 +270,10 @@ def _build_plate_queue(rows_for_plate, group_assignments, p,
     sample_path   = p["sample_path"]
     blank_path    = p["blank_path"]
 
+    randomize_order = p.get("randomize_order", False)
+    block_size      = int(p.get("block_size", GROUP_SIZE))
+    rng_seed        = int(p.get("run_seed", 42))
+
     samples = [r for r in rows_for_plate
                if r.get("Dropout {Y/N}", "").strip().upper() != "Y"]
 
@@ -281,6 +285,12 @@ def _build_plate_queue(rows_for_plate, group_assignments, p,
             group_map[grp] = []
             groups_seen.append(grp)
         group_map[grp].append(row)
+
+    if randomize_order:
+        import random as _random
+        rng = _random.Random(rng_seed)
+        for grp in groups_seen:
+            rng.shuffle(group_map[grp])
 
     ctrl_counts = count_controls(groups_seen, group_map, use_k562, use_supermix)
     alloc_pl    = ControlAllocator(ctrl_counts, use_k562, use_supermix,
@@ -309,7 +319,7 @@ def _build_plate_queue(rows_for_plate, group_assignments, p,
         if use_k562:     add_k562()
         if use_supermix: add_supermix()
         add_blank()
-        for batch in split_groups(group_map[grp]):
+        for batch in split_groups(group_map[grp], max_size=block_size):
             for row in batch:
                 roi      = row["ROI"].strip()
                 well_pos = well_to_slot1(row["Well_ID"].strip()).replace("Slot1", sample_slot)
@@ -787,6 +797,19 @@ def render_ms_queue_tab():
     st.success("Groups: " + "  |  ".join(f"**{g}** ({n})" for g, n in summary.items()))
 
     st.divider()
+    st.subheader("Run Order")
+    _ro1, _ro2, _ro3 = st.columns([1, 1, 1])
+    randomize_order = _ro1.checkbox("Randomize sample order within groups", value=False,
+                                    key="msq_randomize")
+    block_size = _ro2.number_input("Blank interval (samples per block)", min_value=1,
+                                   max_value=50, value=GROUP_SIZE, step=1,
+                                   key="msq_block_size",
+                                   help="Number of samples between Blank injections.")
+    run_seed = _ro3.number_input("Random seed", min_value=0, max_value=9999,
+                                 value=42, step=1, key="msq_run_seed",
+                                 disabled=not randomize_order)
+
+    st.divider()
 
     if st.button("Generate queue", type="primary", key="msq_gen"):
         params = dict(
@@ -798,6 +821,9 @@ def render_ms_queue_tab():
             sample_path=sample_path, blank_path=blank_path,
             stem=stem,
             plate_slot_map=plate_slot_map,
+            randomize_order=randomize_order,
+            block_size=block_size,
+            run_seed=run_seed,
         )
         with st.spinner("Generating..."):
             res = build_queue_core(csv_bytes, group_assignments, params)

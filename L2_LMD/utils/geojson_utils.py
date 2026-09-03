@@ -104,6 +104,22 @@ def render_reclassify_tab():
 
     st.divider()
 
+    skip = st.toggle(
+        "Skip reclassification — annotations are already classified",
+        value=False, key="geo_skip",
+        help="Use this if your QuPath annotations already have classification.name set."
+    )
+
+    if skip:
+        st.session_state.t1_geojson = raw
+        st.session_state.t1_stem    = stem
+        st.info("GeoJSON piped to Tab 2 unchanged.")
+        st.download_button(
+            label=f"Download {stem}.geojson (passthrough)",
+            data=raw, file_name=f"{stem}.geojson", mime="application/json",
+        )
+        st.stop()
+
     if st.button("Reclassify", type="primary"):
         corrected, n_fixed, names, rejected = reclassify_geojson(raw)
         st.session_state.geo_result = {

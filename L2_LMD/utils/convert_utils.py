@@ -45,7 +45,10 @@ except ImportError:
 
 ROWS      = list("ABCDEFGH")
 COLS      = list(range(1, 13))
-ALL_WELLS = [f"{r}{c}" for r in ROWS for c in COLS]   # A1 .. H12
+ALL_WELLS = [f"{r}{c}" for r in ROWS for c in COLS]   # A1 .. H12  (96-well)
+
+ROWS_384      = list("ABCDEFGHIJKLMNOP")
+ALL_WELLS_384 = [f"{r}{c}" for r in ROWS_384 for c in range(1, 25)]  # A1 .. P24 (384-well)
 
 
 # ============================================================
@@ -92,34 +95,35 @@ def count_inside_triangle(calib_pts: np.ndarray, polygons: list):
 
 
 def assign_wells(polygons: list, randomize: bool = False, seed: int = 42,
-                 balance: bool = False, groups_dict: dict = None) -> dict:
-    """Returns {name: 'Plate1_A1'} across as many 96-well plates as needed.
-    balance=True: group-aware bin-packing keeps sample groups on the same plate
-    while spreading load as evenly as possible.
-    groups_dict: {roi_name: group_label} — if None, falls back to name prefix."""
+                 balance: bool = False, groups_dict: dict = None,
+                 plate_type: str = "96") -> dict:
+    """Returns {name: 'Plate1_A1'} across as many plates as needed.
+    plate_type: '96' (default) or '384'.
+    balance=True: group-aware bin-packing keeps sample groups on the same plate."""
     import math
     from collections import defaultdict
 
+    wells    = ALL_WELLS if plate_type == "96" else ALL_WELLS_384
+    capacity = len(wells)
+
     names    = sorted(set(p["name"] for p in polygons))
     n        = len(names)
-    n_plates = max(1, math.ceil(n / 96))
+    n_plates = max(1, math.ceil(n / capacity))
 
     if not balance or n_plates == 1:
-        # Sequential fill
         if randomize:
             random.Random(seed).shuffle(names)
         result = {}
         for i, name in enumerate(names):
-            result[name] = f"Plate{i // 96 + 1}_{ALL_WELLS[i % 96]}"
+            result[name] = f"Plate{i // capacity + 1}_{wells[i % capacity]}"
         return result
 
-    # Group-aware bin-packing: use explicit groups_dict or fall back to name prefix
     groups = defaultdict(list)
     for name in names:
         grp = (groups_dict or {}).get(name, name.split("_")[0])
         groups[grp].append(name)
 
-    group_list = sorted(groups.items(), key=lambda x: -len(x[1]))   # largest first (LPT)
+    group_list = sorted(groups.items(), key=lambda x: -len(x[1]))
     if randomize:
         random.Random(seed).shuffle(group_list)
 
@@ -135,7 +139,7 @@ def assign_wells(polygons: list, randomize: bool = False, seed: int = 42,
     for plate_idx in range(n_plates):
         plate_names = sorted(plate_name_lists[plate_idx])
         for j, name in enumerate(plate_names):
-            result[name] = f"Plate{plate_idx + 1}_{ALL_WELLS[j]}"
+            result[name] = f"Plate{plate_idx + 1}_{wells[j]}"
     return result
 
 
@@ -241,9 +245,15 @@ def build_xml_zip(plate_xml_list: list, well_map: dict, stem: str) -> bytes:
 # ============================================================
 # 96-WELL PLATE PREVIEW
 # ============================================================
-def plot_well_preview(well_map: dict, title: str) -> bytes:
+def plot_well_preview(well_map: dict, title: str, plate_type: str = "96") -> bytes:
     """well_map: {name: 'A1'} for a single plate.
+    plate_type: '96' or '384'.
     Outer ring = supergroup (first hyphen segment); fill = group (underscore prefix)."""
+    is_384 = plate_type == "384"
+    p_rows = ROWS_384 if is_384 else ROWS
+    p_cols = list(range(1, 25)) if is_384 else COLS
+    n_rows, n_cols = len(p_rows), len(p_cols)
+
     groups       = sorted({n.split("_")[0] for n in well_map})
     palette      = cm.tab20
     group_color  = {g: palette(i / max(len(groups), 1)) for i, g in enumerate(groups)}
@@ -255,41 +265,54 @@ def plot_well_preview(well_map: dict, title: str) -> bytes:
 
     well_to_name = {v: k for k, v in well_map.items()}
 
-    fig, ax = plt.subplots(figsize=(12, 6))
-    ax.set_xlim(-0.8, 12.5)
-    ax.set_ylim(-0.5, 8.5)
+    if is_384:
+        fig, ax = plt.subplots(figsize=(22, 10))
+        ax.set_xlim(-1.0, n_cols + 0.5)
+        ax.set_ylim(-0.5, n_rows + 0.5)
+        outer_r, inner_r = 0.46, 0.36
+        fsize_label = 1.8
+        fsize_axis  = 5
+    else:
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.set_xlim(-0.8, n_cols + 0.5)
+        ax.set_ylim(-0.5, n_rows + 0.5)
+        outer_r, inner_r = 0.46, 0.36
+        fsize_label = 3.5
+        fsize_axis  = 8
+
     ax.set_aspect("equal")
     ax.axis("off")
     ax.set_title(title, fontsize=12, fontweight="bold", pad=8)
 
-    for r_idx, r in enumerate(ROWS):
-        for c_idx, c in enumerate(COLS):
+    for r_idx, r in enumerate(p_rows):
+        for c_idx, c in enumerate(p_cols):
             x    = c_idx
-            y    = 7 - r_idx
+            y    = (n_rows - 1) - r_idx
             well = f"{r}{c}"
             name = well_to_name.get(well, "")
             grp  = name.split("_")[0] if name else ""
             sg   = name.split("-")[0] if name else ""
             if name:
-                # Outer ring: supergroup
-                ax.add_patch(plt.Circle((x, y), 0.46, color=sg_color.get(sg, "whitesmoke"),
+                ax.add_patch(plt.Circle((x, y), outer_r, color=sg_color.get(sg, "whitesmoke"),
                                         ec="none", zorder=1))
-                # Inner fill: group
-                color = group_color.get(grp, "whitesmoke")
-                ax.add_patch(plt.Circle((x, y), 0.36, color=color, ec="#333333", lw=0.7, zorder=2))
+                ax.add_patch(plt.Circle((x, y), inner_r, color=group_color.get(grp, "whitesmoke"),
+                                        ec="#333333", lw=0.5, zorder=2))
                 ax.text(x, y, name.replace("_", "\n"), ha="center", va="center",
-                        fontsize=3.5, zorder=3, color="black")
+                        fontsize=fsize_label, zorder=3, color="black")
             else:
-                ax.add_patch(plt.Circle((x, y), 0.42, color="whitesmoke",
-                                        ec="#999999", lw=0.7, zorder=2))
+                ax.add_patch(plt.Circle((x, y), inner_r + (outer_r - inner_r) / 2,
+                                        color="whitesmoke", ec="#999999", lw=0.5, zorder=2))
 
-    for r_idx, r in enumerate(ROWS):
-        ax.text(-0.65, 7 - r_idx, r, ha="right", va="center", fontsize=8, fontweight="bold")
-    for c_idx, c in enumerate(COLS):
-        ax.text(c_idx, 8.0, str(c), ha="center", va="bottom", fontsize=8, fontweight="bold")
+    x_off = -0.6 if is_384 else -0.65
+    y_top = n_rows - 0.05
+    for r_idx, r in enumerate(p_rows):
+        ax.text(x_off, (n_rows - 1) - r_idx, r, ha="right", va="center",
+                fontsize=fsize_axis, fontweight="bold")
+    for c_idx, c in enumerate(p_cols):
+        ax.text(c_idx, y_top, str(c), ha="center", va="bottom",
+                fontsize=fsize_axis, fontweight="bold")
 
-    # Two-part legend: supergroups + groups
-    sg_patches = [mpatches.Patch(color=sg_color[sg], label=sg) for sg in supergroups]
+    sg_patches  = [mpatches.Patch(color=sg_color[sg], label=sg) for sg in supergroups]
     grp_patches = [mpatches.Patch(color=group_color[g], label=g) for g in groups]
     if sg_patches:
         leg1 = ax.legend(handles=sg_patches, bbox_to_anchor=(1.01, 1), loc="upper left",
@@ -343,11 +366,12 @@ def render_convert_tab():
     points, polygons = parse_geojson(raw)
 
     n_unique = len(set(p["name"] for p in polygons))
-    n_plates = max(1, (n_unique + 95) // 96)
+    # n_plates shown here is an estimate before plate_type is selected — updated below
+    n_plates_est = max(1, (n_unique + 95) // 96)
     c1, c2, c3 = st.columns(3)
     c1.metric("Calibration point candidates", len(points))
     c2.metric("Polygon ROIs", len(polygons))
-    c3.metric("Plates needed", n_plates)
+    c3.metric("Plates needed (96-well est.)", n_plates_est)
 
     if not polygons:
         st.error("No polygon features found in GeoJSON.")
@@ -550,11 +574,14 @@ def render_convert_tab():
 
     # Well assignment
     st.subheader("Well Assignment")
-    opt_cols  = st.columns(2)
-    randomize = opt_cols[0].checkbox("Randomize well order", value=False)
-    balance   = opt_cols[1].checkbox(
-        "Balance samples across plates",
-        value=True,
+    opt_cols   = st.columns(3)
+    plate_type = opt_cols[0].selectbox("Plate format", ["96-well", "384-well"], index=0,
+                                       key="t2_plate_type")
+    plate_type_key = "96" if plate_type == "96-well" else "384"
+    capacity   = 96 if plate_type_key == "96" else 384
+    randomize  = opt_cols[1].checkbox("Randomize well order", value=False)
+    balance    = opt_cols[2].checkbox(
+        "Balance samples across plates", value=True,
         help="Keep sample groups together; spread groups across plates as evenly as possible"
     )
     seed = 42
@@ -562,7 +589,8 @@ def render_convert_tab():
         seed = int(st.number_input("Random seed", value=42, step=1, key="rand_seed"))
 
     well_map     = assign_wells(polygons, randomize=randomize, seed=seed, balance=balance,
-                               groups_dict=st.session_state.get("t2_groups"))
+                                groups_dict=st.session_state.get("t2_groups"),
+                                plate_type=plate_type_key)
     plate_labels = get_plate_labels(well_map)
 
     # Show all plates in tabs
@@ -581,7 +609,8 @@ def render_convert_tab():
                         use_container_width=True, hide_index=True
                     )
             with col_plate:
-                preview_png = plot_well_preview(pwm, f"{pl} — {n_in_plate} ROIs")
+                preview_png = plot_well_preview(pwm, f"{pl} — {n_in_plate} ROIs",
+                                               plate_type=plate_type_key)
                 png_map[pl] = preview_png
                 st.image(preview_png, use_container_width=True)
                 st.download_button(
