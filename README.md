@@ -1,87 +1,97 @@
-[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://lmdutils-qfyodkmxyhworjpq24nanz.streamlit.app/)
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://lmdutils-jvcvkwqujnfbvutyhfs5l.streamlit.app/)
 
 # LMD_utils
-Collection of scripts and code for working in spatial proteomics and laser micro-dissection microscopy (LMD) workflows. Useful for sample sorting before laser-dissection and for general documentation purposes.
+Scripts and Streamlit apps for spatial proteomics laser micro-dissection (LMD) workflows.
+
+The primary tool is the **L2-LMD integrated app** (`L2_LMD/`), which covers the full pipeline from QuPath export to MS instrument queue in four tabs. A standalone MS queue generator (`L2_msQ/`) is also available for cases where only the queue step is needed.
 
 ---
 
-## Full Workflow
+## L2-LMD — Integrated App (`L2_LMD/`)
 
-### Step 1 — Re-classify GeoJSON (`import_json.py` or online app)
+**Run locally:**
+```bash
+cd L2_LMD
+pip install -r requirements.txt
+streamlit run L2_LMD_app.py
+```
 
-Prepares the QuPath GeoJSON export for the Coscia Lab converter by copying `properties.name` into `properties.classification.name` for each annotation.
+### Tab 1 — Reclassify GeoJSON
+Copies `properties.name` into `properties.classification.name` for each QuPath annotation.
+Required if annotations were drawn without a class assigned. Can be skipped via toggle if annotations are already classified.
 
-**Input:** `*.geojson` exported from QuPath  
-**Output:** `*_corrected.geojson` — ready for the Coscia Lab converter
-
-**Usage (online):** Upload GeoJSON in the [online app](https://lmdutils-qfyodkmxyhworjpq24nanz.streamlit.app/), click Re-classify, download corrected file.  
-**Usage (local):** Set `INPUT_FILE` in `import_json.py` and run.
-
----
-
-### Step 2 — Convert GeoJSON to XML (external: Coscia Lab converter)
-
-1. Go to [https://qupath-to-lmd-mdcberlin.streamlit.app/](https://qupath-to-lmd-mdcberlin.streamlit.app/)
-2. Upload the corrected GeoJSON from Step 1
-3. Check calibration points and QCs
-4. Select 96-well plate (no need to update the well map — Step 3 handles sorting)
-5. Confirm plate layout, process file, download zipped output
+**Input:** `*.geojson` from QuPath export
+**Output:** `*_reclassified.geojson`
 
 ---
 
-### Step 3 — Process LMD Collection (`process_lmd_collection.py` or online app)
+### Tab 2 — Convert to LMD XML
+Converts reclassified GeoJSON to LMD XML using [py-lmd](https://github.com/MannLabs/py-lmd) (MannLabs, Apache-2.0).
 
-Sorts samples alphabetically, assigns well positions A1–H12, updates the XML, and generates output files.
+- Select 3 calibration points; coverage check confirms ROI centroids lie within the calibration triangle
+- Define sample groups / supergroups from name prefixes; add custom prefixes to subdivide
+- Well assignment across 96-well or 384-well plates (user-selectable)
+  - 384-well: configurable margin, space between rows, and space between columns for easier pipetting
+  - Group-aware bin-packing keeps sample groups together while balancing plates
+- Plate map PNG preview and cutting list CSV available before XML conversion
 
-**Input** (from the Coscia Lab converter zip):
-- `*.xml` — shapes with CapID + XY coordinates
-- `samples_and_wells.json` — `{ "SampleName": "WellPosition" }`
-
-**Output:**
-- `*_sorted.xml` — shapes sorted by new well; `<TransferID>` added; `<CapID>` updated
-- `*_96wellplate.csv` — 96-well layout, samples assigned alphabetically
-- `*_sample_list.csv` — ROI number, sample name, well ID, comments, processed
-- `samples_and_wells_updated.json` — updated well mapping
-- `*_platemap.png` — color-coded plate map
-
-**Usage (online):** Upload zip in the [online app](https://lmdutils-qfyodkmxyhworjpq24nanz.streamlit.app/), click Process, download outputs.  
-**Usage (local):** Set `COLLECTION_FOLDER` in `process_lmd_collection.py` and run. Outputs written to `lmd_outputs/` subfolder.
+**Input:** `*_reclassified.geojson`
+**Output:** `*_PlateN.xml` per plate, `samples_and_wells.json`, plate map PNGs, cutting list CSV
 
 ---
 
-### Step 4 — Generate MS Sample Queue (`create_ms_queue.py`)
+### Tab 3 — Post-Cutting QC
+Mark dropout ROIs after stereomicroscope inspection. Dropout ROIs are excluded from the MS queue and from re-run XMLs.
 
-Generates the mass spectrometry instrument queue from the sample list CSV produced in Step 3.
-
-**Input:** `*_sample_list.csv` (Core, ROI, Well_ID, Dropout columns)
-
-**Output:**
-- `*_queue.csv` / `*_queue.xlsx` — instrument queue with K562, Supermix, and Blank controls
-- `*_slot1.csv` / `*_slot1.png` — 96-well layout for samples (Slot1)
-- `*_slot2.csv` / `*_slot2.png` — 96-well layout for controls (Slot2: K562→row A, Supermix→row C, Blank→row E+)
-
-**Queue logic:**
-- Start of each core: K562, Supermix, Blank
-- Every group of ≤6 samples: [samples], Blank
-- Samples with Dropout=Y excluded from queue, shown on plate map in grey with red label
-- Spare vials (max(3, 10%) per control type) placed in Slot2 plate but not in queue
-
-**Usage (local):** Set `INPUT_CSV` and `OUTPUT_DIR` at the top of `create_ms_queue.py`, configure LC/MS methods, run script.
+**Input:** Sample list piped from Tab 2 (or CSV upload)
+**Output:** `*_sample_list.csv` (with Dropout Y/N), `*_rerun.zip` (XMLs with dropouts removed)
 
 ---
 
-## Scripts
+### Tab 4 — MS Sample Queue
+Generates the Bruker timsTOF instrument queue. Run groups re-indexed from 1 after dropout removal.
+
+- K562, Supermix, Blank controls with configurable loads and spare vials (max(3, 10%) per type)
+- User-defined blank interval (samples per block) and optional randomized run order within groups
+- Group size summary, divide-group helper, and per-plate slot assignment
+- Dropout wells shown in grey with red label on plate map
+
+**Input:** `*_sample_list.csv` (from Tab 3 or upload)
+**Output:** `*_queue.xlsx`, per-slot CSVs and plate map PNGs (zip)
+
+---
+
+## L2 MS Queue — Standalone App (`L2_msQ/`)
+
+Lightweight standalone queue generator. No GeoJSON or XML required.
+
+**Input:** CSV with `sample_name` and `well` columns (optional `group` column)
+**Features:** Auto-group detection from filename, group editor, divide-group helper, randomize toggle + block size
+**Output:** `*_queue.xlsx`, plate map PNGs (zip)
+
+```bash
+cd L2_msQ
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+---
+
+## Legacy Scripts
+
+These standalone scripts are superseded by the L2-LMD app but retained for offline/scripted use.
 
 | Script | Description |
 |---|---|
-| `import_json.py` | Re-classify GeoJSON annotations (Step 1, offline) |
-| `process_lmd_collection.py` | Process LMD collection folder (Step 3, offline) |
-| `process_lmd_collection_streamlit.py` | Online app for Steps 1 + 3 |
-| `create_ms_queue.py` | Generate MS sample queue (Step 4, offline) |
-| `sort_XML_ROI_by96well.py` | Legacy: sort XML by CapID only (superseded by Step 3) |
+| `import_json.py` | Re-classify GeoJSON annotations (Tab 1, offline) |
+| `process_lmd_collection.py` | Process LMD collection folder (offline) |
+| `process_lmd_collection_streamlit.py` | Older combined Streamlit app (Steps 1+3) |
+| `create_ms_queue_streamlit.py` | Older standalone MS queue Streamlit app |
+| `sort_XML_ROI_by96well.py` | Legacy: sort XML by CapID only |
 
 ---
 
-### Links
-- Coscia Lab QuPath to XML converter: [https://qupath-to-lmd-mdcberlin.streamlit.app/](https://qupath-to-lmd-mdcberlin.streamlit.app/)
+## Links
+- py-lmd (MannLabs): [https://github.com/MannLabs/py-lmd](https://github.com/MannLabs/py-lmd) — Apache-2.0
+- Coscia Lab converter: [https://qupath-to-lmd-mdcberlin.streamlit.app/](https://qupath-to-lmd-mdcberlin.streamlit.app/)
 - Coscia Lab GitHub: [https://github.com/CosciaLab/Qupath_to_LMD](https://github.com/CosciaLab/Qupath_to_LMD)
