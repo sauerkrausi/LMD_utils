@@ -1,4 +1,4 @@
-| [![L2-LMD](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://lmdutils-jvcvkwqujnfbvutyhfs5l.streamlit.app/) | [![L2-msQ](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://l2msqueue.streamlit.app/) |
+| [![L2-LMD](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://lmdutils-jvcvkwqujjnfbvutyhfs5l.streamlit.app//) | [![L2-msQ](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://l2msqueue.streamlit.app/) |
 |:---:|:---:|
 | L2-LMD | L2-msQ |
 
