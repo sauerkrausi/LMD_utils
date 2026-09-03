@@ -1,4 +1,5 @@
-[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://lmdutils-jvcvkwqujnfbvutyhfs5l.streamlit.app/)
+[![L2 LMD](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://lmdutils-jvcvkwqujnfbvutyhfs5l.streamlit.app/)
+[![L2 MS queue](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://l2msqueue.streamlit.app/)
 
 # LMD_utils
 Scripts and Streamlit apps for spatial proteomics laser micro-dissection (LMD) workflows.
