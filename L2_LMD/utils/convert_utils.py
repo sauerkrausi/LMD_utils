@@ -155,7 +155,8 @@ def assign_wells(polygons: list, randomize: bool = False, seed: int = 42,
     for plate_idx in range(n_plates):
         plate_names = sorted(plate_name_lists[plate_idx])
         for j, name in enumerate(plate_names):
-            result[name] = f"Plate{plate_idx + 1}_{wells[j]}"
+            # If a group exceeds plate capacity, spill onto the next plate number
+            result[name] = f"Plate{plate_idx + 1 + j // capacity}_{wells[j % capacity]}"
     return result
 
 
