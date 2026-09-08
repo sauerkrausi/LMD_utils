@@ -74,7 +74,7 @@ def render_reclassify_tab():
         stem = None
 
     if raw is None:
-        st.stop()
+        return
 
     # Parse and preview
     try:
@@ -88,7 +88,7 @@ def render_reclassify_tab():
         n_polygons  = n_total - n_points
     except Exception as e:
         st.error(f"Could not parse GeoJSON: {e}")
-        st.stop()
+        return
 
     col1, col2, col3 = st.columns(3)
     col1.metric("Total features", n_total)
@@ -118,7 +118,7 @@ def render_reclassify_tab():
             label=f"Download {stem}.geojson (passthrough)",
             data=raw, file_name=f"{stem}.geojson", mime="application/json",
         )
-        st.stop()
+        return
 
     if st.button("Reclassify", type="primary"):
         corrected, n_fixed, names, rejected = reclassify_geojson(raw)
