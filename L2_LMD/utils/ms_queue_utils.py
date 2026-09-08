@@ -735,7 +735,6 @@ def render_ms_queue_tab():
             "ROI":   r["ROI"].strip(),
             "Well":  r.get("Well_ID", "").strip(),
             "Group": (confirmed_assignments.get(r["ROI"].strip())
-                      or csv_group_map.get(r["ROI"].strip())
                       or suggest_group(r["ROI"].strip())),
         }
         for r in samples
