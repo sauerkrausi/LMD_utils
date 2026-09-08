@@ -791,17 +791,25 @@ def render_ms_queue_tab():
         pd.DataFrame(block_data),
         column_config={
             "Block":  st.column_config.TextColumn("Block",  help="Edit to reassign to a different block"),
-            "Group":  st.column_config.TextColumn("Group",  disabled=True),
+            "Group":  st.column_config.TextColumn("Group",  help="Edit to rename or merge groups"),
             "Sample": st.column_config.TextColumn("Sample", disabled=True),
         },
         column_order=["Block", "Group", "Sample"],
         hide_index=True, use_container_width=True, key="msq_block_editor",
     )
     new_block_assignments = dict(zip(_group_labels, edited_blocks["Block"]))
+    # Map old group label -> new group label from edits
+    group_renames = dict(zip(_group_labels, edited_blocks["Group"]))
 
     if st.button("Confirm blocks", key="msq_confirm_blocks"):
         st.session_state.msq_block_assignments = new_block_assignments
-        st.session_state.msq_results           = None
+        # Propagate group renames to sample assignments
+        current = st.session_state.msq_group_assignments or {}
+        if current:
+            st.session_state.msq_group_assignments = {
+                roi: group_renames.get(grp, grp) for roi, grp in current.items()
+            }
+        st.session_state.msq_results = None
         st.rerun()
     block_assignments = st.session_state.msq_block_assignments or new_block_assignments
 
