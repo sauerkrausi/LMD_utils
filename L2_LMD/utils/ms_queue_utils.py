@@ -789,7 +789,7 @@ def render_ms_queue_tab():
         column_order=["Block", "Group", "Sample"],
         hide_index=True, use_container_width=True, key="msq_block_editor",
     )
-    new_block_assignments = {g: row["Block"] for g, row in zip(_group_labels, edited_blocks.itertuples())}
+    new_block_assignments = dict(zip(_group_labels, edited_blocks["Block"]))
 
     if st.button("Confirm blocks", key="msq_confirm_blocks"):
         st.session_state.msq_block_assignments = new_block_assignments
