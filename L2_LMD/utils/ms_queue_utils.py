@@ -628,7 +628,7 @@ def render_ms_queue_tab():
         stem      = pipe_stem or "sample_list"
         st.info("Using sample list piped from Tab 3.")
     else:
-        st.stop()
+        return
 
     # Reset groups if CSV content changed
     csv_hash = hash(csv_bytes)
@@ -785,7 +785,7 @@ def render_ms_queue_tab():
 
     if not st.session_state.msq_group_assignments:
         st.info("Confirm grouping above to continue.")
-        st.stop()
+        return
 
     group_assignments = st.session_state.msq_group_assignments
 
