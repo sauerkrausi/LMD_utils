@@ -170,7 +170,7 @@ def plot_plate(grid, color_map, title, label_map=None, legend_group_map=None,
 
 
 # ============================================================
-# GROUPING
+# GROUPING / BLOCKING
 # ============================================================
 def suggest_group(name: str) -> str:
     """Strip trailing numbers/spaces to get a run-group key."""
@@ -178,12 +178,21 @@ def suggest_group(name: str) -> str:
     return key or name.strip()
 
 
+def suggest_block(name: str) -> str:
+    """First token before - or _ is the block key (e.g. 'H20' from 'H20-015340-A3-Core32-A')."""
+    parts = re.split(r'[-_]', name.strip(), maxsplit=1)
+    return parts[0].strip() if parts and parts[0].strip() else name.strip()
+
+
 # ============================================================
 # CONTROL COUNTING (pre-pass)
 # ============================================================
-def count_controls(groups_seen, group_map, use_k562, use_supermix):
-    """Pre-count controls needed to compute row-band offsets."""
-    k562_used     = len(groups_seen) if use_k562     else 0
+def count_controls(groups_seen, group_map, use_k562, use_supermix, block_map=None):
+    """Pre-count controls needed to compute row-band offsets.
+    block_map: {group_label: block_label} — K562 fires once per block, not per group.
+    """
+    n_blocks      = len({(block_map or {}).get(g, suggest_block(g)) for g in groups_seen})
+    k562_used     = n_blocks if use_k562 else 0
     supermix_used = len(groups_seen) if use_supermix else 0
     blank_used    = sum(1 + len(split_groups(group_map[g])) for g in groups_seen)
 
@@ -252,7 +261,7 @@ class ControlAllocator:
 # ============================================================
 def _build_plate_queue(rows_for_plate, group_assignments, p,
                        sample_slot, ctrl_start_slot,
-                       counts, alloc):
+                       counts, alloc, block_assignments=None):
     """Build queue rows for a single sample plate, mutating counts and alloc in place."""
     use_k562      = p["use_k562"]
     use_supermix  = p["use_supermix"]
@@ -292,7 +301,8 @@ def _build_plate_queue(rows_for_plate, group_assignments, p,
         for grp in groups_seen:
             rng.shuffle(group_map[grp])
 
-    ctrl_counts = count_controls(groups_seen, group_map, use_k562, use_supermix)
+    ctrl_counts = count_controls(groups_seen, group_map, use_k562, use_supermix,
+                                 block_map=block_assignments)
     alloc_pl    = ControlAllocator(ctrl_counts, use_k562, use_supermix,
                                    start_slot=ctrl_start_slot)
     queue_pl    = []
@@ -315,8 +325,12 @@ def _build_plate_queue(rows_for_plate, group_assignments, p,
         vial = alloc_pl.add("Blank", sid)
         queue_pl.append(make_row(vial, sid, blank_path, sep_method, inj_method, ms_method, proc_method))
 
+    current_block = None
     for grp in groups_seen:
-        if use_k562:     add_k562()
+        blk = (block_assignments or {}).get(grp, suggest_block(grp))
+        if blk != current_block:
+            current_block = blk
+            if use_k562: add_k562()
         if use_supermix: add_supermix()
         add_blank()
         for batch in split_groups(group_map[grp], max_size=block_size):
@@ -363,7 +377,8 @@ def _build_plate_queue(rows_for_plate, group_assignments, p,
     }
 
 
-def build_queue_core(csv_bytes: bytes, group_assignments: dict, p: dict) -> dict:
+def build_queue_core(csv_bytes: bytes, group_assignments: dict, p: dict,
+                     block_assignments: dict = None) -> dict:
     """
     group_assignments: {roi_name: group_label}
     plate_slot_map in p: {plate_label: {"sample_slot": "Slot1", "ctrl_start_slot": 2}}
@@ -418,7 +433,7 @@ def build_queue_core(csv_bytes: bytes, group_assignments: dict, p: dict) -> dict
         pr = _build_plate_queue(
             plate_rows[pl], group_assignments, p,
             slot_info["sample_slot"], slot_info["ctrl_start_slot"],
-            counts, combined_alloc,
+            counts, combined_alloc, block_assignments=block_assignments,
         )
         plate_results[pl] = pr
         all_queue.extend(pr["queue_rows"])
@@ -561,7 +576,8 @@ def render_ms_queue_tab():
     st.header("MS Sample Queue")
     st.caption("Generates Bruker timsTOF queue (XLSX + plate maps) from sample list CSV.")
 
-    for key in ("msq_results", "msq_zip", "msq_last", "msq_group_assignments", "msq_csv_hash"):
+    for key in ("msq_results", "msq_zip", "msq_last", "msq_group_assignments",
+                "msq_block_assignments", "msq_csv_hash"):
         if key not in st.session_state:
             st.session_state[key] = None
 
@@ -780,7 +796,8 @@ def render_ms_queue_tab():
         changed = new_assignments != st.session_state.msq_group_assignments
         st.session_state.msq_group_assignments = new_assignments
         if changed:
-            st.session_state.msq_results = None
+            st.session_state.msq_results        = None
+            st.session_state.msq_block_assignments = None
         st.rerun()
 
     if not st.session_state.msq_group_assignments:
@@ -795,6 +812,49 @@ def render_ms_queue_tab():
         summary.setdefault(grp, 0)
         summary[grp] += 1
     st.success("Groups: " + "  |  ".join(f"**{g}** ({n})" for g, n in summary.items()))
+
+    st.divider()
+    st.subheader("Block Assignment")
+    st.caption(
+        "K562 fires once per block (at block start). "
+        "Supermix + Blank fire at every group start within a block. "
+        "Block is auto-derived from the first token of the group name — edit to override."
+    )
+
+    unique_groups = sorted(set(group_assignments.values()))
+    saved_blocks  = st.session_state.msq_block_assignments or {}
+    block_data    = [
+        {"Group": g, "Block": saved_blocks.get(g, suggest_block(g))}
+        for g in unique_groups
+    ]
+    block_df = pd.DataFrame(block_data)
+    edited_blocks = st.data_editor(
+        block_df,
+        column_config={
+            "Group": st.column_config.TextColumn("Group", disabled=True),
+            "Block": st.column_config.TextColumn("Block", help="Edit to reassign group to a different block"),
+        },
+        hide_index=True,
+        use_container_width=True,
+        key="msq_block_editor",
+    )
+    new_block_assignments = dict(zip(edited_blocks["Group"], edited_blocks["Block"]))
+
+    if st.button("Confirm blocks", key="msq_confirm_blocks"):
+        st.session_state.msq_block_assignments = new_block_assignments
+        st.session_state.msq_results           = None
+        st.rerun()
+
+    block_assignments = st.session_state.msq_block_assignments or new_block_assignments
+
+    # Block summary
+    block_summary = {}
+    for grp in unique_groups:
+        blk = block_assignments.get(grp, suggest_block(grp))
+        block_summary.setdefault(blk, []).append(grp)
+    st.info("Blocks: " + "  |  ".join(
+        f"**{b}** ({', '.join(gs)})" for b, gs in sorted(block_summary.items())
+    ))
 
     st.divider()
     st.subheader("Run Order")
@@ -826,7 +886,8 @@ def render_ms_queue_tab():
             run_seed=run_seed,
         )
         with st.spinner("Generating..."):
-            res = build_queue_core(csv_bytes, group_assignments, params)
+            res = build_queue_core(csv_bytes, group_assignments, params,
+                                   block_assignments=block_assignments)
             st.session_state.msq_results = res
             st.session_state.msq_zip     = build_zip(res)
 

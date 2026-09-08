@@ -289,10 +289,10 @@ def render_process_tab():
         rerun_buf = io.BytesIO()
         with zipfile.ZipFile(rerun_buf, "w", zipfile.ZIP_DEFLATED) as z:
             for plate_label, xml_bytes in rerun_xmls:
-                z.writestr(f"{stem}_{plate_label}_rerun.xml", xml_bytes)
+                z.writestr(f"{stem}_{plate_label}_dropout.xml", xml_bytes)
         dl2.download_button(
-            "Download re-run XMLs (zip)", rerun_buf.getvalue(),
-            file_name=f"{stem}_rerun.zip", mime="application/zip",
+            "Download dropout XMLs (zip)", rerun_buf.getvalue(),
+            file_name=f"{stem}_dropout.zip", mime="application/zip",
             type="primary",
         )
     elif n_dropouts == 0:
