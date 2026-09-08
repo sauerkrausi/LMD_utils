@@ -384,7 +384,7 @@ def render_convert_tab():
         stem = st.session_state.get("t1_stem", "geojson")
         st.info("Using GeoJSON piped from Tab 1.")
     else:
-        st.stop()
+        return
 
     points, polygons = parse_geojson(raw)
 
