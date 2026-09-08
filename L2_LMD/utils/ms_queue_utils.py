@@ -803,12 +803,11 @@ def render_ms_queue_tab():
 
     if st.button("Confirm blocks", key="msq_confirm_blocks"):
         st.session_state.msq_block_assignments = new_block_assignments
-        # Propagate group renames to sample assignments
-        current = st.session_state.msq_group_assignments or {}
-        if current:
-            st.session_state.msq_group_assignments = {
-                roi: group_renames.get(grp, grp) for roi, grp in current.items()
-            }
+        # Apply group renames to all ROIs from current init_data
+        st.session_state.msq_group_assignments = {
+            row["ROI"]: group_renames.get(row["Group"], row["Group"])
+            for row in init_data
+        }
         st.session_state.msq_results = None
         st.rerun()
     block_assignments = st.session_state.msq_block_assignments or new_block_assignments
