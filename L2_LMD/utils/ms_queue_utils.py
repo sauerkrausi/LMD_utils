@@ -730,12 +730,21 @@ def render_ms_queue_tab():
 
     confirmed_assignments = st.session_state.msq_group_assignments or {}
 
+    # Auto-number groups sequentially (Group 1, 2, ...) in order of first appearance
+    _seen_sg, _roi_to_group_label = [], {}
+    for r in samples:
+        roi = r["ROI"].strip()
+        sg  = suggest_group(roi)
+        if sg not in _seen_sg:
+            _seen_sg.append(sg)
+        _roi_to_group_label[roi] = f"Group {_seen_sg.index(sg) + 1}"
+
     init_data = [
         {
             "ROI":   r["ROI"].strip(),
             "Well":  r.get("Well_ID", "").strip(),
-            "Group": (confirmed_assignments.get(r["ROI"].strip())
-                      or suggest_group(r["ROI"].strip())),
+            "Group": confirmed_assignments.get(r["ROI"].strip()) or _roi_to_group_label[r["ROI"].strip()],
+            "Name":  suggest_group(r["ROI"].strip()),
         }
         for r in samples
     ]
@@ -769,23 +778,20 @@ def render_ms_queue_tab():
     saved_blocks = st.session_state.msq_block_assignments or {}
     block_data   = [
         {
-            "Block":   saved_blocks.get(g, group_auto_block[g]),
-            "Group":   f"Group {i + 1}",
-            "Sample":  g,
+            "Block":  saved_blocks.get(g, group_auto_block[g]),
+            "Sample": g,
         }
-        for i, g in enumerate(seen_order)
+        for g in seen_order
     ]
-    # key for linking editor rows back to group labels
     _group_labels = seen_order
 
     edited_blocks = st.data_editor(
         pd.DataFrame(block_data),
         column_config={
             "Block":  st.column_config.TextColumn("Block",  help="Edit to reassign to a different block"),
-            "Group":  st.column_config.TextColumn("Group",  disabled=True),
             "Sample": st.column_config.TextColumn("Sample", disabled=True),
         },
-        column_order=["Block", "Group", "Sample"],
+        column_order=["Block", "Sample"],
         hide_index=True, use_container_width=True, key="msq_block_editor",
     )
     new_block_assignments = dict(zip(_group_labels, edited_blocks["Block"]))
@@ -836,10 +842,12 @@ def render_ms_queue_tab():
     edited_df = st.data_editor(
         group_df,
         column_config={
+            "Group": st.column_config.TextColumn("Group", help="Edit to reassign to a different group"),
+            "Name":  st.column_config.TextColumn("Name",  disabled=True),
             "ROI":   st.column_config.TextColumn("ROI",   disabled=True),
             "Well":  st.column_config.TextColumn("Well",  disabled=True),
-            "Group": st.column_config.TextColumn("Group", help="Edit to change group assignment"),
         },
+        column_order=["Group", "Name", "ROI", "Well"],
         hide_index=True,
         use_container_width=True,
         key="msq_group_editor",
