@@ -869,8 +869,12 @@ def render_ms_queue_tab():
         changed = new_assignments != st.session_state.msq_group_assignments
         st.session_state.msq_group_assignments = new_assignments
         if changed:
-            st.session_state.msq_results        = None
-            st.session_state.msq_block_assignments = None
+            st.session_state.msq_results = None
+            # Keep block assignments whose group labels survived the edit
+            surviving   = set(new_assignments.values())
+            prev_blocks = st.session_state.msq_block_assignments or {}
+            kept        = {g: b for g, b in prev_blocks.items() if g in surviving}
+            st.session_state.msq_block_assignments = kept or None
         st.rerun()
 
     if not st.session_state.msq_group_assignments:
