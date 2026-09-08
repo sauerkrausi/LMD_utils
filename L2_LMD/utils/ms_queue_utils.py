@@ -248,22 +248,33 @@ def control_gaps(events):
 def build_run_events(groups_seen, group_map, p, block_assignments=None, closing_set=False):
     """Ordered run events as (kind, row), kind in Sample, K562, Supermix, Blank.
 
-    Block start always fires the full K562 + Supermix + Blank set and resets the
-    Supermix counter, so no interval carries across a block boundary. A group start
-    inside a block fires a Blank, and a Supermix only if the next batch would push
-    past smix_interval. Blank interval is set by the batch size. Only samples count.
-    Consecutive Blanks are collapsed to one.
+    Block start always fires the full K562 + Supermix + Blank set and resets both
+    counters, so no interval carries across a block boundary. Inside a block controls
+    are interval driven: a Blank fires when the next batch would push past block_size
+    samples, a Supermix when it would push past smix_interval, and a Supermix is always
+    followed by a Blank. Group boundaries do not force a control, so consecutive small
+    groups share a batch. Only samples are counted.
     """
     use_k562     = p["use_k562"]
     use_supermix = p["use_supermix"]
     block_size   = int(p.get("block_size", GROUP_SIZE))
     smix_every   = int(p.get("smix_interval", SUPERMIX_INTERVAL))
 
-    events, current_block, since_smix = [], None, 0
+    events, current_block = [], None
+    since_smix = since_blank = 0
 
-    def push_blank():
-        if not events or events[-1][0] != "Blank":
+    def push_controls(n_next):
+        """Controls due before the next batch of n_next samples."""
+        nonlocal since_smix, since_blank
+        if not n_next:
+            return
+        if use_supermix and since_smix + n_next > smix_every:
+            events.append(("Supermix", None))
             events.append(("Blank", None))
+            since_smix = since_blank = 0
+        elif since_blank + n_next > block_size:
+            events.append(("Blank", None))
+            since_blank = 0
 
     for gi, grp in enumerate(groups_seen):
         blk     = (block_assignments or {}).get(grp, suggest_block(grp))
@@ -276,30 +287,26 @@ def build_run_events(groups_seen, group_map, p, block_assignments=None, closing_
                 events.append(("K562", None))
             if use_supermix:
                 events.append(("Supermix", None))
-                since_smix = 0
-        elif use_supermix and first_n and since_smix + first_n > smix_every:
-            events.append(("Supermix", None))
-            since_smix = 0
-        push_blank()
+            events.append(("Blank", None))
+            since_smix = since_blank = 0
+        else:
+            push_controls(first_n)
 
         for bi, batch in enumerate(batches):
             events.extend(("Sample", row) for row in batch)
-            since_smix += len(batch)
+            since_smix  += len(batch)
+            since_blank += len(batch)
             if closing_set and gi == len(groups_seen) - 1 and bi == len(batches) - 1:
                 continue
-            # Fire before the next batch would push past the interval
-            nxt = len(batches[bi + 1]) if bi + 1 < len(batches) else 0
-            if use_supermix and nxt and since_smix + nxt > smix_every:
-                events.append(("Supermix", None))
-                since_smix = 0
-            push_blank()
+            # Last batch of a group: the next group start decides
+            push_controls(len(batches[bi + 1]) if bi + 1 < len(batches) else 0)
 
     if closing_set:
         if use_k562:
             events.append(("K562", None))
         if use_supermix:
             events.append(("Supermix", None))
-        push_blank()
+        events.append(("Blank", None))
 
     return collapse_repeats(apply_overrides(events, p.get("overrides")))
 
@@ -870,7 +877,8 @@ def render_ms_queue_tab():
     st.subheader("Block Assignment")
     st.caption(
         "K562 + Supermix + Blank at each block start, counters reset there. "
-        "Blank at each group start, Supermix only if the sample cap would be exceeded. "
+        "Inside a block a Blank runs at least every 6 samples and a Supermix at least "
+        "every 12, group boundaries do not force a control. "
         "Run ends on K562, Supermix, Blank. "
         "Blocks come from the first token of the sample name. Edit a label to rename a "
         "block, or give two rows the same label to merge them."
