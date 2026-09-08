@@ -728,16 +728,6 @@ def render_ms_queue_tab():
             if roi and grp:
                 csv_group_map[roi] = grp
 
-    # Re-index groups compactly from 1 (order of first appearance among active samples)
-    if csv_group_map:
-        seen = []
-        for r in samples:
-            g = csv_group_map.get(r["ROI"].strip(), "")
-            if g and g not in seen:
-                seen.append(g)
-        remap = {g: f"Group{i+1}" for i, g in enumerate(seen)}
-        csv_group_map = {roi: remap.get(g, g) for roi, g in csv_group_map.items()}
-
     confirmed_assignments = st.session_state.msq_group_assignments or {}
 
     init_data = [
@@ -755,25 +745,52 @@ def render_ms_queue_tab():
     # Block editor — before group editor
     st.subheader("Block Assignment")
     st.caption(
-        "K562 fires once per block (at block start). "
-        "Supermix + Blank fire at every group start within a block. "
-        "Block is auto-derived from the first token of the group name — edit to override."
+        "K562 at block start. Supermix + Blank at each group start. "
+        "Block auto-derived from first token of group name — edit to override."
     )
-    unique_groups_init = sorted({row["Group"] for row in init_data})
-    saved_blocks       = st.session_state.msq_block_assignments or {}
-    block_data         = [
-        {"Group": g, "Block": saved_blocks.get(g, suggest_block(g))}
-        for g in unique_groups_init
+    # Build group-to-ROI map for block auto-detection
+    group_to_rois = {}
+    for row in init_data:
+        group_to_rois.setdefault(row["Group"], []).append(row["ROI"])
+
+    # Sequential group order (order of first appearance)
+    seen_order = []
+    for row in init_data:
+        if row["Group"] not in seen_order:
+            seen_order.append(row["Group"])
+
+    # Auto-assign block numbers by ROI prefix
+    seen_prefixes, group_auto_block = [], {}
+    for g in seen_order:
+        prefix = suggest_block(group_to_rois[g][0])
+        if prefix not in seen_prefixes:
+            seen_prefixes.append(prefix)
+        group_auto_block[g] = f"Block {seen_prefixes.index(prefix) + 1}"
+
+    saved_blocks = st.session_state.msq_block_assignments or {}
+    block_data   = [
+        {
+            "Block":   saved_blocks.get(g, group_auto_block[g]),
+            "Group":   f"Group {i + 1}",
+            "Sample":  g,
+        }
+        for i, g in enumerate(seen_order)
     ]
+    # key for linking editor rows back to group labels
+    _group_labels = seen_order
+
     edited_blocks = st.data_editor(
         pd.DataFrame(block_data),
         column_config={
-            "Group": st.column_config.TextColumn("Group", disabled=True),
-            "Block": st.column_config.TextColumn("Block", help="Edit to reassign group to a different block"),
+            "Block":  st.column_config.TextColumn("Block",  help="Edit to reassign to a different block"),
+            "Group":  st.column_config.TextColumn("Group",  disabled=True),
+            "Sample": st.column_config.TextColumn("Sample", disabled=True),
         },
+        column_order=["Block", "Group", "Sample"],
         hide_index=True, use_container_width=True, key="msq_block_editor",
     )
-    new_block_assignments = dict(zip(edited_blocks["Group"], edited_blocks["Block"]))
+    new_block_assignments = {g: row["Block"] for g, row in zip(_group_labels, edited_blocks.itertuples())}
+
     if st.button("Confirm blocks", key="msq_confirm_blocks"):
         st.session_state.msq_block_assignments = new_block_assignments
         st.session_state.msq_results           = None
@@ -782,11 +799,11 @@ def render_ms_queue_tab():
 
     # Block summary
     block_summary = {}
-    for g in unique_groups_init:
-        blk = block_assignments.get(g, suggest_block(g))
+    for g in seen_order:
+        blk = block_assignments.get(g, group_auto_block[g])
         block_summary.setdefault(blk, []).append(g)
     st.info("Blocks: " + "  |  ".join(
-        f"**{b}** ({', '.join(gs)})" for b, gs in sorted(block_summary.items())
+        f"**{b}** ({len(gs)} groups)" for b, gs in sorted(block_summary.items())
     ))
 
     st.divider()
