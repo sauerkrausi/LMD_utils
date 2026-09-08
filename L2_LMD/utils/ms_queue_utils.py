@@ -761,16 +761,17 @@ def render_ms_queue_tab():
     for row in init_data:
         group_to_rois.setdefault(row["Group"], []).append(row["ROI"])
 
-    # Sequential group order (order of first appearance)
-    seen_order = []
+    # Sequential group order (order of first appearance); map Group label -> original name
+    seen_order, group_label_to_name = [], {}
     for row in init_data:
         if row["Group"] not in seen_order:
             seen_order.append(row["Group"])
+            group_label_to_name[row["Group"]] = row["Name"]
 
-    # Auto-assign block numbers by ROI prefix
+    # Auto-assign block numbers by ROI prefix of the original name
     seen_prefixes, group_auto_block = [], {}
     for g in seen_order:
-        prefix = suggest_block(group_to_rois[g][0])
+        prefix = suggest_block(group_label_to_name[g])
         if prefix not in seen_prefixes:
             seen_prefixes.append(prefix)
         group_auto_block[g] = f"Block {seen_prefixes.index(prefix) + 1}"
@@ -779,7 +780,8 @@ def render_ms_queue_tab():
     block_data   = [
         {
             "Block":  saved_blocks.get(g, group_auto_block[g]),
-            "Sample": g,
+            "Group":  g,
+            "Sample": group_label_to_name[g],
         }
         for g in seen_order
     ]
@@ -789,9 +791,10 @@ def render_ms_queue_tab():
         pd.DataFrame(block_data),
         column_config={
             "Block":  st.column_config.TextColumn("Block",  help="Edit to reassign to a different block"),
+            "Group":  st.column_config.TextColumn("Group",  disabled=True),
             "Sample": st.column_config.TextColumn("Sample", disabled=True),
         },
-        column_order=["Block", "Sample"],
+        column_order=["Block", "Group", "Sample"],
         hide_index=True, use_container_width=True, key="msq_block_editor",
     )
     new_block_assignments = dict(zip(_group_labels, edited_blocks["Block"]))
