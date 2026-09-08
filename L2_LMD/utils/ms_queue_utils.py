@@ -188,6 +188,63 @@ def suggest_block(name: str) -> str:
 # ============================================================
 # RUN SEQUENCE
 # ============================================================
+def collapse_repeats(events):
+    """Drop a control injection that immediately repeats the previous one."""
+    out = []
+    for ev in events:
+        if ev[0] != "Sample" and out and out[-1][0] == ev[0]:
+            continue
+        out.append(ev)
+    return out
+
+
+def apply_overrides(events, overrides):
+    """Manual add or remove of one control, anchored after a named ROI.
+
+    overrides: [{"action": "add"|"remove", "type": "K562"|"Supermix"|"Blank",
+                 "after": roi_name}]
+    """
+    if not overrides:
+        return events
+    adds, drops = {}, {}
+    for ov in overrides:
+        roi = (ov.get("after") or "").strip()
+        ctl = ov.get("type")
+        if not roi or ctl not in ("K562", "Supermix", "Blank"):
+            continue
+        target = drops if ov.get("action") == "remove" else adds
+        target.setdefault(roi, []).append(ctl)
+
+    out, pending = [], []
+    for kind, row in events:
+        if kind == "Sample":
+            out.append((kind, row))
+            roi = row["ROI"].strip()
+            out.extend((c, None) for c in adds.get(roi, []))
+            pending = list(drops.get(roi, []))
+            continue
+        if pending and kind in pending:
+            pending.remove(kind)
+            continue
+        out.append((kind, row))
+    return out
+
+
+def control_gaps(events):
+    """Max samples between Blanks and between Supermix injections."""
+    max_b = max_s = since_b = since_s = 0
+    for kind, _ in events:
+        if kind == "Sample":
+            since_b += 1
+            since_s += 1
+            max_b, max_s = max(max_b, since_b), max(max_s, since_s)
+        elif kind == "Blank":
+            since_b = 0
+        elif kind == "Supermix":
+            since_s = 0
+    return max_b, max_s
+
+
 def build_run_events(groups_seen, group_map, p, block_assignments=None, closing_set=False):
     """Ordered run events as (kind, row), kind in Sample, K562, Supermix, Blank.
 
@@ -243,7 +300,8 @@ def build_run_events(groups_seen, group_map, p, block_assignments=None, closing_
         if use_supermix:
             events.append(("Supermix", None))
         push_blank()
-    return events
+
+    return collapse_repeats(apply_overrides(events, p.get("overrides")))
 
 
 # ============================================================
@@ -419,8 +477,12 @@ def _build_plate_queue(rows_for_plate, group_assignments, p,
 
     alloc.entries.extend(alloc_pl.entries)
 
+    max_blank_gap, max_smix_gap = control_gaps(events)
+
     return {
         "queue_rows":    queue_pl,
+        "max_blank_gap": max_blank_gap,
+        "max_smix_gap":  max_smix_gap,
         "groups_seen":   groups_seen,
         "samples":       samples,
         "ctrl_counts":   ctrl_counts,
@@ -598,7 +660,10 @@ def build_queue_core(csv_bytes: bytes, group_assignments: dict, p: dict,
         "queue_xlsx":         queue_xlsx,
         "sample_slot_outputs": sample_slot_outputs,
         "ctrl_slots":         ctrl_slot_outputs,
+        "queue_rows":         all_queue,
         "n_queue":            len(all_queue),
+        "max_blank_gap":      max((r["max_blank_gap"] for r in plate_results.values()), default=0),
+        "max_smix_gap":       max((r["max_smix_gap"]  for r in plate_results.values()), default=0),
         "counts":             counts,
         "k562_spares":        total_k562_sp,
         "supermix_spares":    total_smix_sp,
@@ -633,7 +698,7 @@ def render_ms_queue_tab():
     st.caption("Generates Bruker timsTOF queue (XLSX + plate maps) from sample list CSV.")
 
     for key in ("msq_results", "msq_zip", "msq_last", "msq_group_assignments",
-                "msq_block_assignments", "msq_csv_hash"):
+                "msq_block_labels", "msq_csv_hash", "msq_overrides", "msq_last_key"):
         if key not in st.session_state:
             st.session_state[key] = None
 
@@ -707,6 +772,7 @@ def render_ms_queue_tab():
     if st.session_state.msq_csv_hash != csv_hash:
         st.session_state.msq_group_assignments = None
         st.session_state.msq_results           = None
+        st.session_state.msq_block_labels      = None
         st.session_state.msq_csv_hash          = csv_hash
 
     st.caption(f"Output stem: `{stem}`")
@@ -767,13 +833,6 @@ def render_ms_queue_tab():
     st.session_state.msq_plate_slot_map = plate_slot_map
 
     st.divider()
-    st.subheader("Run Grouping")
-    st.caption(
-        "Groups are auto-suggested by stripping trailing numbers from sample names. "
-        "Edit **Group** to reassign samples. Every block starts on K562/Supermix/Blank, "
-        "every group on a Blank, and a Blank runs at least every 6 samples, a Supermix at "
-        "least every 12. The run ends on K562, Supermix, Blank."
-    )
 
     # Read Group column from CSV if present (piped from Tab 2/3)
     has_group_col = "Group" in (reader.fieldnames or [])
@@ -807,157 +866,86 @@ def render_ms_queue_tab():
     ]
     group_df = pd.DataFrame(init_data)
 
-    # Block editor — before group editor
+    # Block editor, one row per block key
     st.subheader("Block Assignment")
     st.caption(
         "K562 + Supermix + Blank at each block start, counters reset there. "
         "Blank at each group start, Supermix only if the sample cap would be exceeded. "
         "Run ends on K562, Supermix, Blank. "
-        "Block auto-derived from first token of group name — edit to override."
+        "Blocks come from the first token of the sample name. Edit a label to rename a "
+        "block, or give two rows the same label to merge them."
     )
-    # Build group-to-ROI map for block auto-detection
-    group_to_rois = {}
-    for row in init_data:
-        group_to_rois.setdefault(row["Group"], []).append(row["ROI"])
 
-    # Sequential group order (order of first appearance); map Group label -> original name
+    # Group order and representative sample name
     seen_order, group_label_to_name = [], {}
     for row in init_data:
         if row["Group"] not in seen_order:
             seen_order.append(row["Group"])
             group_label_to_name[row["Group"]] = row["Name"]
 
-    # Auto-assign block numbers by ROI prefix of the original name
-    seen_prefixes, group_auto_block = [], {}
+    # Block key per group, numbered by first appearance
+    group_prefix, seen_prefixes = {}, []
     for g in seen_order:
-        prefix = suggest_block(group_label_to_name[g])
-        if prefix not in seen_prefixes:
-            seen_prefixes.append(prefix)
-        group_auto_block[g] = f"Block {seen_prefixes.index(prefix) + 1}"
+        pre = suggest_block(group_label_to_name[g])
+        group_prefix[g] = pre
+        if pre not in seen_prefixes:
+            seen_prefixes.append(pre)
+    auto_block = {pre: f"Block {i + 1}" for i, pre in enumerate(seen_prefixes)}
 
-    saved_blocks = st.session_state.msq_block_assignments or {}
+    n_groups, n_rois = {}, {}
+    for g in seen_order:
+        n_groups[group_prefix[g]] = n_groups.get(group_prefix[g], 0) + 1
+    for row in init_data:
+        pre = group_prefix[row["Group"]]
+        n_rois[pre] = n_rois.get(pre, 0) + 1
+
+    saved_labels = st.session_state.msq_block_labels or {}
     block_data   = [
         {
-            "Block":  saved_blocks.get(g, group_auto_block[g]),
-            "Group":  g,
-            "Sample": group_label_to_name[g],
+            "Block":  saved_labels.get(pre, auto_block[pre]),
+            "Sample": pre,
+            "Groups": n_groups[pre],
+            "ROIs":   n_rois[pre],
         }
-        for g in seen_order
+        for pre in seen_prefixes
     ]
-    _group_labels = seen_order
 
     edited_blocks = st.data_editor(
         pd.DataFrame(block_data),
         column_config={
-            "Block":  st.column_config.TextColumn("Block",  help="Edit to reassign to a different block"),
-            "Group":  st.column_config.TextColumn("Group",  help="Edit to rename or merge groups"),
-            "Sample": st.column_config.TextColumn("Sample", disabled=True),
+            "Block":  st.column_config.TextColumn("Block", help="Rename, or reuse a label to merge blocks"),
+            "Sample": st.column_config.TextColumn("Sample prefix", disabled=True),
+            "Groups": st.column_config.NumberColumn("Groups", disabled=True),
+            "ROIs":   st.column_config.NumberColumn("ROIs",   disabled=True),
         },
-        column_order=["Block", "Group", "Sample"],
+        column_order=["Block", "Sample", "Groups", "ROIs"],
         hide_index=True, use_container_width=True, key="msq_block_editor",
     )
-    new_block_assignments = dict(zip(_group_labels, edited_blocks["Block"]))
-    # Map old group label -> new group label from edits
-    group_renames = dict(zip(_group_labels, edited_blocks["Group"]))
 
-    if st.button("Confirm blocks", key="msq_confirm_blocks"):
-        st.session_state.msq_block_assignments = new_block_assignments
-        # Apply group renames to all ROIs from current init_data
-        st.session_state.msq_group_assignments = {
-            row["ROI"]: group_renames.get(row["Group"], row["Group"])
-            for row in init_data
-        }
-        st.session_state.msq_results = None
-        st.rerun()
-    block_assignments = st.session_state.msq_block_assignments or new_block_assignments
+    new_labels = dict(zip(seen_prefixes, edited_blocks["Block"]))
+    if new_labels != saved_labels:
+        st.session_state.msq_block_labels = new_labels
+        st.session_state.msq_results      = None
+    block_assignments = {g: new_labels.get(group_prefix[g], auto_block[group_prefix[g]])
+                         for g in seen_order}
 
     # Block summary
     block_summary = {}
     for g in seen_order:
-        blk = block_assignments.get(g, group_auto_block[g])
-        block_summary.setdefault(blk, []).append(g)
+        block_summary.setdefault(block_assignments[g], []).append(g)
     st.info("Blocks: " + "  |  ".join(
-        f"**{b}** ({len(gs)} groups)" for b, gs in sorted(block_summary.items())
+        f"**{b}** ({len(gs)} groups)" for b, gs in block_summary.items()
     ))
-
-    st.divider()
-
-    # Group size summary
-    group_counts = {}
-    for row in init_data:
-        g = row["Group"]
-        group_counts[g] = group_counts.get(g, 0) + 1
-    gcols = st.columns(max(len(group_counts), 1))
-    for i, (g, n) in enumerate(sorted(group_counts.items())):
-        gcols[i].metric(g, f"{n} ROIs")
-
-    # Divide group helper
-    _sp1, _sp2, _sp3 = st.columns([2, 1, 1])
-    split_grp = _sp1.selectbox("Divide group", sorted(group_counts.keys()),
-                                key="msq_split_grp", label_visibility="visible")
-    split_n   = _sp2.number_input("Into N parts", min_value=2, max_value=20, value=2, step=1,
-                                   key="msq_split_n", label_visibility="visible")
-    if _sp3.button("Divide", key="msq_split_btn", use_container_width=True):
-        rois_in_grp = [row["ROI"] for row in init_data if row["Group"] == split_grp]
-        n_parts     = int(split_n)
-        chunk       = math.ceil(len(rois_in_grp) / n_parts)
-        updated     = {row["ROI"]: row["Group"] for row in init_data}
-        for i, roi in enumerate(rois_in_grp):
-            suffix = chr(ord('a') + i // chunk)   # a, b, c ...
-            updated[roi] = f"{split_grp}{suffix}"
-        st.session_state.msq_group_assignments = updated
-        st.session_state.msq_results           = None
-
-    edited_df = st.data_editor(
-        group_df,
-        column_config={
-            "Group": st.column_config.TextColumn("Group", help="Edit to reassign to a different group"),
-            "Name":  st.column_config.TextColumn("Name",  disabled=True),
-            "ROI":   st.column_config.TextColumn("ROI",   disabled=True),
-            "Well":  st.column_config.TextColumn("Well",  disabled=True),
-        },
-        column_order=["Group", "Name", "ROI", "Well"],
-        hide_index=True,
-        use_container_width=True,
-        key="msq_group_editor",
-    )
-
-    new_assignments = dict(zip(edited_df["ROI"], edited_df["Group"]))
-
-    if st.button("Confirm grouping", type="primary", key="msq_confirm"):
-        changed = new_assignments != st.session_state.msq_group_assignments
-        st.session_state.msq_group_assignments = new_assignments
-        if changed:
-            st.session_state.msq_results = None
-            # Keep block assignments whose group labels survived the edit
-            surviving   = set(new_assignments.values())
-            prev_blocks = st.session_state.msq_block_assignments or {}
-            kept        = {g: b for g, b in prev_blocks.items() if g in surviving}
-            st.session_state.msq_block_assignments = kept or None
-        st.rerun()
-
-    if not st.session_state.msq_group_assignments:
-        st.info("Confirm grouping above to continue.")
-        return
-
-    group_assignments = st.session_state.msq_group_assignments
-
-    # Group summary
-    summary = {}
-    for roi, grp in group_assignments.items():
-        summary.setdefault(grp, 0)
-        summary[grp] += 1
-    st.success("Groups: " + "  |  ".join(f"**{g}** ({n})" for g, n in summary.items()))
 
     st.divider()
     st.subheader("Run Order")
     _ro1, _ro2, _ro3 = st.columns([1, 1, 1])
     randomize_order = _ro1.checkbox("Randomize sample order within groups", value=False,
                                     key="msq_randomize")
-    block_size = _ro2.number_input("Blank interval (samples per block)", min_value=1,
+    block_size = _ro2.number_input("Blank interval (samples)", min_value=1,
                                    max_value=50, value=GROUP_SIZE, step=1,
                                    key="msq_block_size",
-                                   help="Number of samples between Blank injections.")
+                                   help="Max samples between Blank injections.")
     run_seed = _ro3.number_input("Random seed", min_value=0, max_value=9999,
                                  value=42, step=1, key="msq_run_seed",
                                  disabled=not randomize_order)
@@ -971,28 +959,51 @@ def render_ms_queue_tab():
                                     value=40, step=1, key="msq_run_len",
                                     help="Per injection, used for the runtime estimate.")
 
-    st.divider()
+    if use_supermix and int(smix_interval) < int(block_size):
+        st.warning("Supermix interval is below the Blank interval. Supermix can only be "
+                   "placed at a batch boundary, so its cap cannot be met.")
 
-    if st.button("Generate queue", type="primary", key="msq_gen"):
-        params = dict(
-            date=date, initials=initials, lc_short=lc_short, ms_short=ms_short,
-            sample_load=sample_load, k562_load=k562_load, supermix_load=supermix_load,
-            use_k562=use_k562, use_supermix=use_supermix,
-            sep_method=sep_method, inj_method=inj_method,
-            ms_method=ms_method, proc_method=proc_method,
-            sample_path=sample_path, blank_path=blank_path,
-            stem=stem,
-            plate_slot_map=plate_slot_map,
-            randomize_order=randomize_order,
-            block_size=block_size,
-            smix_interval=smix_interval,
-            run_seed=run_seed,
-        )
-        with st.spinner("Generating..."):
+    group_assignments = {row["ROI"]: row["Group"] for row in init_data}
+    overrides         = st.session_state.msq_overrides or []
+
+    params = dict(
+        date=date, initials=initials, lc_short=lc_short, ms_short=ms_short,
+        sample_load=sample_load, k562_load=k562_load, supermix_load=supermix_load,
+        use_k562=use_k562, use_supermix=use_supermix,
+        sep_method=sep_method, inj_method=inj_method,
+        ms_method=ms_method, proc_method=proc_method,
+        sample_path=sample_path, blank_path=blank_path,
+        stem=stem,
+        plate_slot_map=plate_slot_map,
+        randomize_order=randomize_order,
+        block_size=block_size,
+        smix_interval=smix_interval,
+        run_seed=run_seed,
+        overrides=overrides,
+    )
+
+    # Rebuild only when something that changes the queue changed
+    build_key = (
+        csv_hash,
+        tuple(sorted(group_assignments.items())),
+        tuple(sorted(block_assignments.items())),
+        tuple(sorted((pl, v["sample_slot"], v["ctrl_start_slot"])
+                     for pl, v in plate_slot_map.items())),
+        bool(randomize_order), int(block_size), int(smix_interval), int(run_seed),
+        bool(use_k562), bool(use_supermix),
+        sample_load, k562_load, supermix_load, initials, lc_short, ms_short,
+        sep_method, inj_method, ms_method, proc_method, sample_path, blank_path, stem,
+        tuple(sorted((o["action"], o["type"], o["after"]) for o in overrides)),
+    )
+
+    st.divider()
+    if st.session_state.msq_last_key != build_key or not st.session_state.msq_results:
+        with st.spinner("Building queue..."):
             res = build_queue_core(csv_bytes, group_assignments, params,
                                    block_assignments=block_assignments)
-            st.session_state.msq_results = res
-            st.session_state.msq_zip     = build_zip(res)
+            st.session_state.msq_results  = res
+            st.session_state.msq_zip      = build_zip(res)
+            st.session_state.msq_last_key = build_key
 
     res = st.session_state.msq_results
     if not res:
@@ -1010,6 +1021,97 @@ def render_ms_queue_tab():
     _total_min = res["n_queue"] * int(run_len_min)
     st.caption(f"Estimated runtime: {res['n_queue']} injections x {int(run_len_min)} min = "
                f"{_total_min / 60:.1f} h ({_total_min / 1440:.1f} days)")
+
+    if res.get("max_blank_gap", 0) > int(block_size):
+        st.warning(f"Blank gap reaches {res['max_blank_gap']} samples, above the "
+                   f"{int(block_size)} sample setting.")
+    if use_supermix and res.get("max_smix_gap", 0) > int(smix_interval):
+        st.warning(f"Supermix gap reaches {res['max_smix_gap']} samples, above the "
+                   f"{int(smix_interval)} sample setting.")
+    _n_removed = sum(1 for o in overrides if o.get("action") == "remove")
+    if _n_removed:
+        st.warning(f"{_n_removed} manual removal(s) active. Removals bypass the automatic "
+                   f"rules, including the control set at a block start.")
+
+    with st.expander("Run sequence", expanded=True):
+        seq_rows = [
+            {"#": n + 1, "Vial": r.get("Vial", ""), "Sample ID": r.get("Sample ID", "")}
+            for n, r in enumerate(res.get("queue_rows", []))
+        ]
+        st.dataframe(pd.DataFrame(seq_rows), hide_index=True,
+                     use_container_width=True, height=360)
+
+    # ---------- Adjust ----------
+    st.divider()
+    st.subheader("Adjust")
+    st.caption(
+        "Groups are auto-suggested by stripping trailing numbers from sample names. "
+        "Edit the grouping or force a control injection, the queue rebuilds on change."
+    )
+
+    gsum = {}
+    for row in init_data:
+        gsum[row["Group"]] = gsum.get(row["Group"], 0) + 1
+    st.info("Groups: " + "  |  ".join(f"**{g}** ({n})" for g, n in gsum.items()))
+
+    _sp1, _sp2, _sp3 = st.columns([2, 1, 1])
+    split_grp = _sp1.selectbox("Divide group", list(gsum.keys()), key="msq_split_grp")
+    split_n   = _sp2.number_input("Into N parts", min_value=2, max_value=20, value=2, step=1,
+                                  key="msq_split_n")
+    if _sp3.button("Divide", key="msq_split_btn", use_container_width=True):
+        rois_in_grp = [row["ROI"] for row in init_data if row["Group"] == split_grp]
+        chunk       = max(1, math.ceil(len(rois_in_grp) / int(split_n)))
+        updated     = {row["ROI"]: row["Group"] for row in init_data}
+        for n, roi in enumerate(rois_in_grp):
+            updated[roi] = f"{split_grp}{chr(ord('a') + n // chunk)}"
+        st.session_state.msq_group_assignments = updated
+        st.rerun()
+
+    edited_df = st.data_editor(
+        group_df,
+        column_config={
+            "Group": st.column_config.TextColumn("Group", help="Edit to reassign to a different group"),
+            "Name":  st.column_config.TextColumn("Name",  disabled=True),
+            "ROI":   st.column_config.TextColumn("ROI",   disabled=True),
+            "Well":  st.column_config.TextColumn("Well",  disabled=True),
+        },
+        column_order=["Group", "Name", "ROI", "Well"],
+        hide_index=True, use_container_width=True, key="msq_group_editor",
+    )
+    new_assignments = dict(zip(edited_df["ROI"], edited_df["Group"]))
+    if new_assignments != group_assignments:
+        st.session_state.msq_group_assignments = new_assignments
+        st.rerun()
+
+    st.markdown("**Control overrides**")
+    st.caption("Add or remove one injection after a chosen sample, on top of the automatic rules.")
+    ov_cols = ["Action", "Control", "After ROI"]
+    ov_df   = pd.DataFrame(
+        [{"Action": o["action"], "Control": o["type"], "After ROI": o["after"]}
+         for o in overrides],
+        columns=ov_cols,
+    )
+    edited_ov = st.data_editor(
+        ov_df,
+        column_config={
+            "Action":    st.column_config.SelectboxColumn("Action",  options=["add", "remove"]),
+            "Control":   st.column_config.SelectboxColumn("Control", options=["K562", "Supermix", "Blank"]),
+            "After ROI": st.column_config.SelectboxColumn("After ROI",
+                                                          options=[r["ROI"] for r in init_data]),
+        },
+        num_rows="dynamic", hide_index=True, use_container_width=True,
+        key="msq_override_editor",
+    )
+    new_ov = [
+        {"action": r["Action"], "type": r["Control"], "after": r["After ROI"]}
+        for _, r in edited_ov.iterrows()
+        if all(pd.notna(r[c]) and str(r[c]).strip() for c in ov_cols)
+    ]
+    if new_ov != overrides:
+        st.session_state.msq_overrides = new_ov
+        st.rerun()
+
+    st.divider()
 
     # Plate maps — sample slots + ctrl slots, 2 per row
     all_plate_items = []
