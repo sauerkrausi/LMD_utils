@@ -117,51 +117,46 @@ def build_dropout_free_xmls(plates: list, dropout_rois: set) -> list:
 # ============================================================
 # XML ZIP PARSER
 # ============================================================
-def parse_xml_zip(zip_bytes: bytes) -> tuple:
-    """Parse an LMD XML zip. Returns (plates, saw_dict, stem).
+def parse_xml_files(uploaded_files: list) -> tuple:
+    """Parse one or more uploaded XML files. Returns (plates, saw_dict, stem).
     plates:   [(plate_label, xml_bytes), ...]
     saw_dict: {roi_name: 'PlateN_well'}
-    stem:     str (derived from zip filenames)
+    stem:     str (derived from first filename)
     """
     plates   = []
     saw_dict = {}
     stem     = "collection"
+    shape_pat = re.compile(r'^Shape_\d+$')
 
-    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
-        xml_names = sorted(n for n in z.namelist() if n.lower().endswith(".xml"))
-        for xml_name in xml_names:
-            xml_bytes = z.read(xml_name)
-            base = xml_name.rsplit("/", 1)[-1]
+    for f in sorted(uploaded_files, key=lambda x: x.name):
+        xml_bytes = f.getvalue()
+        base      = f.name
 
-            # Derive plate label from filename (e.g. stem_Plate1.xml -> Plate1)
-            m_plate = re.search(r'(Plate\d+)', base, re.IGNORECASE)
-            plate_label = m_plate.group(1) if m_plate else f"Plate{len(plates) + 1}"
-            plate_label = plate_label[0].upper() + plate_label[1:]  # normalize case
+        m_plate     = re.search(r'(Plate\d+)', base, re.IGNORECASE)
+        plate_label = m_plate.group(1).capitalize() if m_plate else f"Plate{len(plates) + 1}"
+        plate_label = plate_label[0].upper() + plate_label[1:]
 
-            # Derive stem from filename: strip plate label + .xml suffix
-            if not plates:
-                stem_candidate = re.sub(r'[_\-]?' + re.escape(plate_label) + r'.*$', '', base, flags=re.IGNORECASE)
-                stem_candidate = stem_candidate.rstrip("_-").replace(".xml", "").replace(".XML", "")
-                if stem_candidate:
-                    stem = stem_candidate
+        if not plates:
+            stem_candidate = re.sub(r'[_\-]?' + re.escape(plate_label) + r'.*$', '', base, flags=re.IGNORECASE)
+            stem_candidate = stem_candidate.rstrip("_-").replace(".xml", "").replace(".XML", "")
+            if stem_candidate:
+                stem = stem_candidate
 
-            plates.append((plate_label, xml_bytes))
+        plates.append((plate_label, xml_bytes))
 
-            # Parse ROI name (TransferID) and well (CapID) from each Shape_N
-            try:
-                root = ET.fromstring(xml_bytes.decode("utf-8-sig"))
-            except Exception:
+        try:
+            root = ET.fromstring(xml_bytes.decode("utf-8-sig"))
+        except Exception:
+            continue
+        for el in root:
+            if not shape_pat.match(el.tag):
                 continue
-            shape_pat = re.compile(r'^Shape_\d+$')
-            for el in root:
-                if not shape_pat.match(el.tag):
-                    continue
-                tid = el.find("TransferID")
-                cap = el.find("CapID")
-                roi  = (tid.text or "").strip() if tid is not None else ""
-                well = (cap.text or "").strip() if cap is not None else ""
-                if roi and well:
-                    saw_dict[roi] = f"{plate_label}_{well}"
+            tid  = el.find("TransferID")
+            cap  = el.find("CapID")
+            roi  = (tid.text or "").strip() if tid is not None else ""
+            well = (cap.text or "").strip() if cap is not None else ""
+            if roi and well:
+                saw_dict[roi] = f"{plate_label}_{well}"
 
     return plates, saw_dict, stem
 
@@ -185,16 +180,16 @@ def render_process_tab():
     if t2_plates is None and st.session_state.get("t2_xml") is not None:
         t2_plates = [("Plate1", st.session_state.t2_xml)]
 
-    # Standalone XML zip upload (bypasses Tab 1/2)
-    with st.expander("Upload LMD XML zip (standalone entry point)", expanded=(t2_plates is None and t2_saw is None)):
-        uploaded_zip = st.file_uploader(
-            "Upload the XML zip from Tab 2 (or directly from py-lmd)",
-            type=["zip"], key="proc_upload_zip",
-            help="Parses TransferID (ROI name) and CapID (well) from each XML to build the sample list."
+    # Standalone XML upload (bypasses Tab 1/2)
+    with st.expander("Upload LMD XML file(s) (standalone entry point)", expanded=(t2_plates is None and t2_saw is None)):
+        uploaded_xmls = st.file_uploader(
+            "Upload one or more plate XML files from py-lmd",
+            type=["xml"], accept_multiple_files=True, key="proc_upload_xml",
+            help="Parses TransferID (ROI name) and CapID (well) to build the sample list."
         )
-        if uploaded_zip is not None:
+        if uploaded_xmls:
             try:
-                plates_up, saw_up, stem_up = parse_xml_zip(uploaded_zip.getvalue())
+                plates_up, saw_up, stem_up = parse_xml_files(uploaded_xmls)
                 if saw_up:
                     st.session_state.t2_plates = plates_up
                     st.session_state.t2_saw    = saw_up
@@ -206,7 +201,7 @@ def render_process_tab():
                 else:
                     st.warning("No TransferID/CapID pairs found in the uploaded XML(s).")
             except Exception as e:
-                st.error(f"Could not parse ZIP: {e}")
+                st.error(f"Could not parse XML: {e}")
 
     uploaded_csv = st.file_uploader(
         "Upload sample list CSV (optional — overrides Tab 2 pipe)",
