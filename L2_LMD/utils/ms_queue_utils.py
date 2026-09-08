@@ -752,6 +752,45 @@ def render_ms_queue_tab():
     ]
     group_df = pd.DataFrame(init_data)
 
+    # Block editor — before group editor
+    st.subheader("Block Assignment")
+    st.caption(
+        "K562 fires once per block (at block start). "
+        "Supermix + Blank fire at every group start within a block. "
+        "Block is auto-derived from the first token of the group name — edit to override."
+    )
+    unique_groups_init = sorted({row["Group"] for row in init_data})
+    saved_blocks       = st.session_state.msq_block_assignments or {}
+    block_data         = [
+        {"Group": g, "Block": saved_blocks.get(g, suggest_block(g))}
+        for g in unique_groups_init
+    ]
+    edited_blocks = st.data_editor(
+        pd.DataFrame(block_data),
+        column_config={
+            "Group": st.column_config.TextColumn("Group", disabled=True),
+            "Block": st.column_config.TextColumn("Block", help="Edit to reassign group to a different block"),
+        },
+        hide_index=True, use_container_width=True, key="msq_block_editor",
+    )
+    new_block_assignments = dict(zip(edited_blocks["Group"], edited_blocks["Block"]))
+    if st.button("Confirm blocks", key="msq_confirm_blocks"):
+        st.session_state.msq_block_assignments = new_block_assignments
+        st.session_state.msq_results           = None
+        st.rerun()
+    block_assignments = st.session_state.msq_block_assignments or new_block_assignments
+
+    # Block summary
+    block_summary = {}
+    for g in unique_groups_init:
+        blk = block_assignments.get(g, suggest_block(g))
+        block_summary.setdefault(blk, []).append(g)
+    st.info("Blocks: " + "  |  ".join(
+        f"**{b}** ({', '.join(gs)})" for b, gs in sorted(block_summary.items())
+    ))
+
+    st.divider()
+
     # Group size summary
     group_counts = {}
     for row in init_data:
@@ -812,49 +851,6 @@ def render_ms_queue_tab():
         summary.setdefault(grp, 0)
         summary[grp] += 1
     st.success("Groups: " + "  |  ".join(f"**{g}** ({n})" for g, n in summary.items()))
-
-    st.divider()
-    st.subheader("Block Assignment")
-    st.caption(
-        "K562 fires once per block (at block start). "
-        "Supermix + Blank fire at every group start within a block. "
-        "Block is auto-derived from the first token of the group name — edit to override."
-    )
-
-    unique_groups = sorted(set(group_assignments.values()))
-    saved_blocks  = st.session_state.msq_block_assignments or {}
-    block_data    = [
-        {"Group": g, "Block": saved_blocks.get(g, suggest_block(g))}
-        for g in unique_groups
-    ]
-    block_df = pd.DataFrame(block_data)
-    edited_blocks = st.data_editor(
-        block_df,
-        column_config={
-            "Group": st.column_config.TextColumn("Group", disabled=True),
-            "Block": st.column_config.TextColumn("Block", help="Edit to reassign group to a different block"),
-        },
-        hide_index=True,
-        use_container_width=True,
-        key="msq_block_editor",
-    )
-    new_block_assignments = dict(zip(edited_blocks["Group"], edited_blocks["Block"]))
-
-    if st.button("Confirm blocks", key="msq_confirm_blocks"):
-        st.session_state.msq_block_assignments = new_block_assignments
-        st.session_state.msq_results           = None
-        st.rerun()
-
-    block_assignments = st.session_state.msq_block_assignments or new_block_assignments
-
-    # Block summary
-    block_summary = {}
-    for grp in unique_groups:
-        blk = block_assignments.get(grp, suggest_block(grp))
-        block_summary.setdefault(blk, []).append(grp)
-    st.info("Blocks: " + "  |  ".join(
-        f"**{b}** ({', '.join(gs)})" for b, gs in sorted(block_summary.items())
-    ))
 
     st.divider()
     st.subheader("Run Order")
