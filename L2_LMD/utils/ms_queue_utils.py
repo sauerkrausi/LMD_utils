@@ -249,18 +249,17 @@ def build_run_events(groups_seen, group_map, p, block_assignments=None, closing_
     """Ordered run events as (kind, row), kind in Sample, K562, Supermix, Blank.
 
     Block start always fires the full K562 + Supermix + Blank set and resets both
-    counters, so no interval carries across a block boundary. Inside a block controls
-    are interval driven: a Blank fires when the next batch would push past block_size
-    samples, a Supermix when it would push past smix_interval, and a Supermix is always
-    followed by a Blank. Group boundaries do not force a control, so consecutive small
-    groups share a batch. Only samples are counted.
+    counters, so no interval carries across a block boundary. Inside a block the samples
+    of all its groups are batched together, evenly, at most block_size per batch, so a
+    group can span a Blank. A Blank fires between batches, a Supermix when the next batch
+    would push past smix_interval and is always followed by a Blank. Only samples count.
     """
     use_k562     = p["use_k562"]
     use_supermix = p["use_supermix"]
     block_size   = int(p.get("block_size", GROUP_SIZE))
     smix_every   = int(p.get("smix_interval", SUPERMIX_INTERVAL))
 
-    events, current_block = [], None
+    events = []
     since_smix = since_blank = 0
 
     def push_controls(n_next):
@@ -276,29 +275,31 @@ def build_run_events(groups_seen, group_map, p, block_assignments=None, closing_
             events.append(("Blank", None))
             since_blank = 0
 
-    for gi, grp in enumerate(groups_seen):
-        blk     = (block_assignments or {}).get(grp, suggest_block(grp))
-        batches = split_groups(group_map[grp], max_size=block_size)
-        first_n = len(batches[0]) if batches else 0
+    # Samples of a block run together, in group order
+    block_order, block_samples = [], {}
+    for grp in groups_seen:
+        blk = (block_assignments or {}).get(grp, suggest_block(grp))
+        if blk not in block_order:
+            block_order.append(blk)
+            block_samples[blk] = []
+        block_samples[blk].extend(group_map[grp])
 
-        if blk != current_block:
-            current_block = blk
-            if use_k562:
-                events.append(("K562", None))
-            if use_supermix:
-                events.append(("Supermix", None))
-            events.append(("Blank", None))
-            since_smix = since_blank = 0
-        else:
-            push_controls(first_n)
+    for bk, blk in enumerate(block_order):
+        if use_k562:
+            events.append(("K562", None))
+        if use_supermix:
+            events.append(("Supermix", None))
+        events.append(("Blank", None))
+        since_smix = since_blank = 0
 
+        batches = split_groups(block_samples[blk], max_size=block_size)
         for bi, batch in enumerate(batches):
             events.extend(("Sample", row) for row in batch)
             since_smix  += len(batch)
             since_blank += len(batch)
-            if closing_set and gi == len(groups_seen) - 1 and bi == len(batches) - 1:
+            if closing_set and bk == len(block_order) - 1 and bi == len(batches) - 1:
                 continue
-            # Last batch of a group: the next group start decides
+            # Nothing after the last batch of a block, the next block start fires its set
             push_controls(len(batches[bi + 1]) if bi + 1 < len(batches) else 0)
 
     if closing_set:
@@ -877,8 +878,8 @@ def render_ms_queue_tab():
     st.subheader("Block Assignment")
     st.caption(
         "K562 + Supermix + Blank at each block start, counters reset there. "
-        "Inside a block a Blank runs at least every 6 samples and a Supermix at least "
-        "every 12, group boundaries do not force a control. "
+        "Inside a block the samples of all its groups are batched together, a Blank runs "
+        "at least every 6 samples and a Supermix at least every 12. "
         "Run ends on K562, Supermix, Blank. "
         "Blocks come from the first token of the sample name. Edit a label to rename a "
         "block, or give two rows the same label to merge them."
