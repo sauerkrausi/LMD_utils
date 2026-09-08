@@ -52,6 +52,7 @@ MS_OPTIONS = list(MS_METHODS.keys()) + ["Custom"]
 ROWS      = list("ABCDEFGH")
 COLS      = list(range(1, 13))
 GROUP_SIZE = 6
+SUPERMIX_INTERVAL = 12
 
 QUEUE_COLS = [
     "Vial", "Sample ID", "Method Set", "Separation Method",
@@ -185,16 +186,74 @@ def suggest_block(name: str) -> str:
 
 
 # ============================================================
-# CONTROL COUNTING (pre-pass)
+# RUN SEQUENCE
 # ============================================================
-def count_controls(groups_seen, group_map, use_k562, use_supermix, block_map=None):
-    """Pre-count controls needed to compute row-band offsets.
-    block_map: {group_label: block_label} — K562 fires once per block, not per group.
+def build_run_events(groups_seen, group_map, p, block_assignments=None, closing_set=False):
+    """Ordered run events as (kind, row), kind in Sample, K562, Supermix, Blank.
+
+    Block start always fires the full K562 + Supermix + Blank set and resets the
+    Supermix counter, so no interval carries across a block boundary. A group start
+    inside a block fires a Blank, and a Supermix only if the next batch would push
+    past smix_interval. Blank interval is set by the batch size. Only samples count.
+    Consecutive Blanks are collapsed to one.
     """
-    n_blocks      = len({(block_map or {}).get(g, suggest_block(g)) for g in groups_seen})
-    k562_used     = n_blocks if use_k562 else 0
-    supermix_used = len(groups_seen) if use_supermix else 0
-    blank_used    = sum(1 + len(split_groups(group_map[g])) for g in groups_seen)
+    use_k562     = p["use_k562"]
+    use_supermix = p["use_supermix"]
+    block_size   = int(p.get("block_size", GROUP_SIZE))
+    smix_every   = int(p.get("smix_interval", SUPERMIX_INTERVAL))
+
+    events, current_block, since_smix = [], None, 0
+
+    def push_blank():
+        if not events or events[-1][0] != "Blank":
+            events.append(("Blank", None))
+
+    for gi, grp in enumerate(groups_seen):
+        blk     = (block_assignments or {}).get(grp, suggest_block(grp))
+        batches = split_groups(group_map[grp], max_size=block_size)
+        first_n = len(batches[0]) if batches else 0
+
+        if blk != current_block:
+            current_block = blk
+            if use_k562:
+                events.append(("K562", None))
+            if use_supermix:
+                events.append(("Supermix", None))
+                since_smix = 0
+        elif use_supermix and first_n and since_smix + first_n > smix_every:
+            events.append(("Supermix", None))
+            since_smix = 0
+        push_blank()
+
+        for bi, batch in enumerate(batches):
+            events.extend(("Sample", row) for row in batch)
+            since_smix += len(batch)
+            if closing_set and gi == len(groups_seen) - 1 and bi == len(batches) - 1:
+                continue
+            # Fire before the next batch would push past the interval
+            nxt = len(batches[bi + 1]) if bi + 1 < len(batches) else 0
+            if use_supermix and nxt and since_smix + nxt > smix_every:
+                events.append(("Supermix", None))
+                since_smix = 0
+            push_blank()
+
+    if closing_set:
+        if use_k562:
+            events.append(("K562", None))
+        if use_supermix:
+            events.append(("Supermix", None))
+        push_blank()
+    return events
+
+
+# ============================================================
+# CONTROL COUNTING (from run sequence)
+# ============================================================
+def count_controls(events, use_k562, use_supermix):
+    """Control totals plus spares, counted from the built run sequence."""
+    k562_used     = sum(1 for k, _ in events if k == "K562")
+    supermix_used = sum(1 for k, _ in events if k == "Supermix")
+    blank_used    = sum(1 for k, _ in events if k == "Blank")
 
     k562_spares     = max(3, math.ceil(k562_used     * 0.10)) if use_k562     else 0
     supermix_spares = max(3, math.ceil(supermix_used * 0.10)) if use_supermix else 0
@@ -261,7 +320,7 @@ class ControlAllocator:
 # ============================================================
 def _build_plate_queue(rows_for_plate, group_assignments, p,
                        sample_slot, ctrl_start_slot,
-                       counts, alloc, block_assignments=None):
+                       counts, alloc, block_assignments=None, closing_set=False):
     """Build queue rows for a single sample plate, mutating counts and alloc in place."""
     use_k562      = p["use_k562"]
     use_supermix  = p["use_supermix"]
@@ -280,7 +339,6 @@ def _build_plate_queue(rows_for_plate, group_assignments, p,
     blank_path    = p["blank_path"]
 
     randomize_order = p.get("randomize_order", False)
-    block_size      = int(p.get("block_size", GROUP_SIZE))
     rng_seed        = int(p.get("run_seed", 42))
 
     samples = [r for r in rows_for_plate
@@ -301,8 +359,8 @@ def _build_plate_queue(rows_for_plate, group_assignments, p,
         for grp in groups_seen:
             rng.shuffle(group_map[grp])
 
-    ctrl_counts = count_controls(groups_seen, group_map, use_k562, use_supermix,
-                                 block_map=block_assignments)
+    events      = build_run_events(groups_seen, group_map, p, block_assignments, closing_set)
+    ctrl_counts = count_controls(events, use_k562, use_supermix)
     alloc_pl    = ControlAllocator(ctrl_counts, use_k562, use_supermix,
                                    start_slot=ctrl_start_slot)
     queue_pl    = []
@@ -325,21 +383,18 @@ def _build_plate_queue(rows_for_plate, group_assignments, p,
         vial = alloc_pl.add("Blank", sid)
         queue_pl.append(make_row(vial, sid, blank_path, sep_method, inj_method, ms_method, proc_method))
 
-    current_block = None
-    for grp in groups_seen:
-        blk = (block_assignments or {}).get(grp, suggest_block(grp))
-        if blk != current_block:
-            current_block = blk
-            if use_k562: add_k562()
-        if use_supermix: add_supermix()
-        add_blank()
-        for batch in split_groups(group_map[grp], max_size=block_size):
-            for row in batch:
-                roi      = row["ROI"].strip()
-                well_pos = well_to_slot1(row["Well_ID"].strip()).replace("Slot1", sample_slot)
-                sid      = f"{date}_{initials}_{lc_short}_{ms_short}_{sample_load}_{roi}"
-                queue_pl.append(make_row(well_pos, sid, sample_path,
-                                         sep_method, inj_method, ms_method, proc_method))
+    for kind, row in events:
+        if kind == "Sample":
+            roi      = row["ROI"].strip()
+            well_pos = well_to_slot1(row["Well_ID"].strip()).replace("Slot1", sample_slot)
+            sid      = f"{date}_{initials}_{lc_short}_{ms_short}_{sample_load}_{roi}"
+            queue_pl.append(make_row(well_pos, sid, sample_path,
+                                     sep_method, inj_method, ms_method, proc_method))
+        elif kind == "K562":
+            add_k562()
+        elif kind == "Supermix":
+            add_supermix()
+        else:
             add_blank()
 
     # Spares (not in queue, just placed in ctrl plate)
@@ -434,6 +489,7 @@ def build_queue_core(csv_bytes: bytes, group_assignments: dict, p: dict,
             plate_rows[pl], group_assignments, p,
             slot_info["sample_slot"], slot_info["ctrl_start_slot"],
             counts, combined_alloc, block_assignments=block_assignments,
+            closing_set=(pl == plate_order[-1]),
         )
         plate_results[pl] = pr
         all_queue.extend(pr["queue_rows"])
@@ -714,8 +770,9 @@ def render_ms_queue_tab():
     st.subheader("Run Grouping")
     st.caption(
         "Groups are auto-suggested by stripping trailing numbers from sample names. "
-        "Edit **Group** to reassign samples. Each group gets K562/Supermix/Blank at the start, "
-        "then a Blank after every 6 samples."
+        "Edit **Group** to reassign samples. Every block starts on K562/Supermix/Blank, "
+        "every group on a Blank, and a Blank runs at least every 6 samples, a Supermix at "
+        "least every 12. The run ends on K562, Supermix, Blank."
     )
 
     # Read Group column from CSV if present (piped from Tab 2/3)
@@ -753,7 +810,9 @@ def render_ms_queue_tab():
     # Block editor — before group editor
     st.subheader("Block Assignment")
     st.caption(
-        "K562 at block start. Supermix + Blank at each group start. "
+        "K562 + Supermix + Blank at each block start, counters reset there. "
+        "Blank at each group start, Supermix only if the sample cap would be exceeded. "
+        "Run ends on K562, Supermix, Blank. "
         "Block auto-derived from first token of group name — edit to override."
     )
     # Build group-to-ROI map for block auto-detection
@@ -903,6 +962,15 @@ def render_ms_queue_tab():
                                  value=42, step=1, key="msq_run_seed",
                                  disabled=not randomize_order)
 
+    _ro4, _ro5, _ro6 = st.columns([1, 1, 1])
+    smix_interval = _ro4.number_input("Supermix interval (samples)", min_value=1,
+                                      max_value=96, value=SUPERMIX_INTERVAL, step=1,
+                                      key="msq_smix_interval", disabled=not use_supermix,
+                                      help="Max samples between Supermix injections.")
+    run_len_min = _ro5.number_input("Run length (min)", min_value=1, max_value=240,
+                                    value=40, step=1, key="msq_run_len",
+                                    help="Per injection, used for the runtime estimate.")
+
     st.divider()
 
     if st.button("Generate queue", type="primary", key="msq_gen"):
@@ -917,6 +985,7 @@ def render_ms_queue_tab():
             plate_slot_map=plate_slot_map,
             randomize_order=randomize_order,
             block_size=block_size,
+            smix_interval=smix_interval,
             run_seed=run_seed,
         )
         with st.spinner("Generating..."):
@@ -938,6 +1007,9 @@ def render_ms_queue_tab():
         f"Blank: {c['Blank']} (+{res['blank_spares']} spare) | "
         f"Control slots used: {n_cslots}"
     )
+    _total_min = res["n_queue"] * int(run_len_min)
+    st.caption(f"Estimated runtime: {res['n_queue']} injections x {int(run_len_min)} min = "
+               f"{_total_min / 60:.1f} h ({_total_min / 1440:.1f} days)")
 
     # Plate maps — sample slots + ctrl slots, 2 per row
     all_plate_items = []
