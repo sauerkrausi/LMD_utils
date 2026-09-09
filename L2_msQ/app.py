@@ -81,6 +81,25 @@ def suggest_group(name: str) -> str:
     return key or name.strip()
 
 
+WELL_RE = re.compile(r'^\s*([A-Za-z])\s*0*(\d+)\s*$')
+
+
+def parse_well(raw, rows, cols):
+    """Normalize a well string to e.g. A13. Returns (well, None) or (None, reason)."""
+    txt = "" if raw is None else str(raw).strip()
+    if not txt or txt.lower() in ("nan", "none"):
+        return None, "empty"
+    m = WELL_RE.match(txt)
+    if not m:
+        return None, "not a well id"
+    r, c = m.group(1).upper(), int(m.group(2))
+    if r not in rows:
+        return None, f"row {r} outside plate"
+    if c not in cols:
+        return None, f"column {c} outside plate"
+    return f"{r}{c}", None
+
+
 def well_sort_key(w):
     try:
         return (ord(w[0].upper()) - ord('A'), int(w[1:]))
@@ -665,9 +684,15 @@ if "sample_name" not in df.columns and event_col is None:
     st.error("CSV must have `sample_name`, or `Location` plus `Event Id`.")
     st.stop()
 
-samples = []
-for _, row in df.iterrows():
-    well = str(row[well_col]).strip()
+_p_rows, _p_cols = PLATE_FORMATS[plate_format]
+
+samples, bad_rows = [], []
+for i, row in df.iterrows():
+    raw_well    = row[well_col]
+    well, why   = parse_well(raw_well, _p_rows, _p_cols)
+    if well is None:
+        bad_rows.append({"CSV row": int(i) + 2, well_col: repr(raw_well), "Problem": why})
+        continue
     if "sample_name" in df.columns:
         name = str(row["sample_name"]).strip()
     else:
@@ -676,12 +701,26 @@ for _, row in df.iterrows():
         name = f"{well}_{ev}"
     grp  = str(row.get("group", suggest_group(name))).strip() if "group" in df.columns \
            else suggest_group(name)
-    if name and well:
+    if name:
         samples.append({"name": name, "well": well, "group": grp})
 
 samples.sort(key=lambda s: well_sort_key(s["well"]))
 
-st.success(f"{len(samples)} samples loaded from `{uploaded.name}`.")
+seen_wells = {}
+for smp in samples:
+    seen_wells.setdefault(smp["well"], []).append(smp["name"])
+dupes = {w: n for w, n in seen_wells.items() if len(n) > 1}
+
+if bad_rows:
+    st.error(f"{len(bad_rows)} row(s) skipped, not valid for a {plate_format} well plate.")
+    st.dataframe(pd.DataFrame(bad_rows), hide_index=True, use_container_width=True)
+if dupes:
+    st.warning("Wells used more than once: " +
+               ", ".join(f"{w} ({len(n)})" for w, n in sorted(dupes.items())))
+if not samples:
+    st.stop()
+
+st.success(f"{len(samples)} samples loaded from `{uploaded.name}` ({plate_format} well plate).")
 
 if mode == "Bulk":
     # Group assignment editor
