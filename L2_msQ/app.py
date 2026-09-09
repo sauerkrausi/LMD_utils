@@ -35,9 +35,14 @@ st.set_page_config(page_title="L2 MS Queue", layout="wide")
 # ============================================================
 ROWS      = list("ABCDEFGH")
 COLS      = list(range(1, 13))
+PLATE_FORMATS = {
+    "96":  (list("ABCDEFGH"),         list(range(1, 13))),
+    "384": (list("ABCDEFGHIJKLMNOP"), list(range(1, 25))),
+}
 GROUP_SIZE = 6
 SCP_BLANK_EVERY = 12
 SCP_STD_EVERY   = 24
+SCP_SPARES      = 3
 
 LC_METHODS = {
     "WhisperZOOM40": (
@@ -88,10 +93,10 @@ def index_to_well(index):
     return ROWS[i // 12], (i % 12) + 1
 
 
-def well_to_vial(well_id: str, slot: str) -> str:
+def well_to_vial(well_id: str, slot: str, n_cols: int = 12) -> str:
     row = ord(well_id[0].upper()) - ord('A')
     col = int(well_id[1:])
-    return f"{slot}:{row * 12 + col}"
+    return f"{slot}:{row * n_cols + col}"
 
 
 def split_groups(samples, max_size=GROUP_SIZE):
@@ -158,41 +163,45 @@ def plot_plate_png(grid, color_map, title, label_map=None) -> bytes:
     return buf.getvalue()
 
 
-def plot_sample_plate(samples_ordered, title) -> bytes:
+def plot_sample_plate(samples_ordered, title, rows=None, cols=None) -> bytes:
     """samples_ordered: list of {well, name, group}"""
-    well_to = {s["well"]: s for s in samples_ordered}
+    rows = rows or ROWS
+    cols = cols or COLS
+    n_r, n_c = len(rows), len(cols)
     groups  = sorted({s["group"] for s in samples_ordered})
     palette = cm.tab20
     gcol    = {g: palette(i / max(len(groups), 1)) for i, g in enumerate(groups)}
 
-    grid      = {r: {c: "" for c in COLS} for r in ROWS}
+    grid      = {r: {c: "" for c in cols} for r in rows}
     color_map = {}
     for s in samples_ordered:
         w = s["well"]
-        if len(w) >= 2 and w[0] in ROWS:
-            grid[w[0]][int(w[1:])] = s["name"]
+        if len(w) >= 2 and w[0].upper() in rows and w[1:].isdigit() and int(w[1:]) in cols:
+            grid[w[0].upper()][int(w[1:])] = s["name"]
             color_map[s["name"]] = gcol.get(s["group"], "white")
 
-    fig, ax = plt.subplots(figsize=(14, 8))
-    ax.set_xlim(-0.5, 12.5)
-    ax.set_ylim(-0.5, 8.5)
+    fig, ax = plt.subplots(figsize=(1.15 * n_c, 1.0 * n_r))
+    ax.set_xlim(-0.5, n_c + 0.5)
+    ax.set_ylim(-0.5, n_r + 0.5)
     ax.set_aspect("equal")
     ax.axis("off")
     ax.set_title(title, fontsize=14, fontweight="bold", pad=12)
-    for r_idx, r in enumerate(ROWS):
-        for c_idx, c in enumerate(COLS):
-            x, y  = c_idx, 7 - r_idx
+    for r_idx, r in enumerate(rows):
+        for c_idx, c in enumerate(cols):
+            x, y  = c_idx, (n_r - 1) - r_idx
             name  = grid[r][c]
             color = color_map.get(name, "whitesmoke")
             edge  = "#444444" if name else "#aaaaaa"
             ax.add_patch(plt.Circle((x, y), 0.42, color=color, ec=edge, lw=0.8, zorder=2))
             if name:
                 ax.text(x, y, name, ha="center", va="center",
-                        fontsize=4.5, zorder=3, color="black", clip_on=True)
-    for r_idx, r in enumerate(ROWS):
-        ax.text(-0.55, 7 - r_idx, r, ha="right", va="center", fontsize=9, fontweight="bold")
-    for c_idx, c in enumerate(COLS):
-        ax.text(c_idx, 8.0, str(c), ha="center", va="bottom", fontsize=9, fontweight="bold")
+                        fontsize=4.5 if n_c <= 12 else 2.8, zorder=3, color="black",
+                        clip_on=True)
+    for r_idx, r in enumerate(rows):
+        ax.text(-0.55, (n_r - 1) - r_idx, r, ha="right", va="center",
+                fontsize=9, fontweight="bold")
+    for c_idx, c in enumerate(cols):
+        ax.text(c_idx, n_r, str(c), ha="center", va="bottom", fontsize=9, fontweight="bold")
     patches = [mpatches.Patch(color=gcol[g], label=g) for g in groups]
     if patches:
         fig.legend(handles=patches, loc="lower center", bbox_to_anchor=(0.5, -0.02),
@@ -234,6 +243,8 @@ def build_queue(samples, group_assignments, p) -> dict:
     randomize_order = p.get("randomize_order", False)
     block_size    = int(p.get("block_size", GROUP_SIZE))
     run_seed      = int(p.get("run_seed", 42))
+    s_rows, s_cols = PLATE_FORMATS.get(str(p.get("plate_format", "96")), (ROWS, COLS))
+    n_cols         = len(s_cols)
 
     # Build group map
     groups_seen, group_map = [], {}
@@ -298,7 +309,7 @@ def build_queue(samples, group_assignments, p) -> dict:
         for batch in split_groups(group_map[grp], block_size):
             for s in batch:
                 sid  = f"{date}_{initials}_{lc_short}_{ms_short}_{sample_load}_{s['name']}"
-                vial = well_to_vial(s["well"], sample_slot)
+                vial = well_to_vial(s["well"], sample_slot, n_cols)
                 queue_rows.append(make_row(vial, sid, sample_path,
                                            sep_method, inj_method, ms_method, proc_method))
             nb = counts["Blank"]
@@ -336,7 +347,7 @@ def build_queue(samples, group_assignments, p) -> dict:
         [{"well": s["well"], "name": s["name"],
           "group": group_assignments.get(s["name"], suggest_group(s["name"]))}
          for s in samples],
-        f"{sample_slot} - Samples"
+        f"{sample_slot} - Samples", rows=s_rows, cols=s_cols,
     )
 
     # Control plate PNGs (one per slot)
@@ -436,6 +447,9 @@ def build_queue_scp(samples, p) -> dict:
     sample_slot   = p.get("sample_slot", "Slot1")
     ctrl_slot_start = int(p.get("ctrl_slot_start", 2))
 
+    s_rows, s_cols = PLATE_FORMATS.get(str(p.get("plate_format", "96")), (ROWS, COLS))
+    n_cols         = len(s_cols)
+
     events = scp_run_events(samples, p)
 
     # Counts come from the built sequence
@@ -443,9 +457,10 @@ def build_queue_scp(samples, p) -> dict:
     supermix_used = sum(1 for k, _ in events if k == "Supermix")
     blank_used    = sum(1 for k, _ in events if k == "Blank")
 
-    k562_sp     = max(3, math.ceil(k562_used     * 0.10)) if use_k562     else 0
-    supermix_sp = max(3, math.ceil(supermix_used * 0.10)) if use_supermix else 0
-    blank_sp    = max(3, math.ceil(blank_used    * 0.10))
+    # Exact need from the sequence, plus 3 spares each
+    k562_sp     = SCP_SPARES if use_k562     else 0
+    supermix_sp = SCP_SPARES if use_supermix else 0
+    blank_sp    = SCP_SPARES
 
     k562_rows     = math.ceil((k562_used + k562_sp)         / 12) if use_k562     else 0
     supermix_rows = math.ceil((supermix_used + supermix_sp) / 12) if use_supermix else 0
@@ -479,8 +494,9 @@ def build_queue_scp(samples, p) -> dict:
     for kind, s in events:
         if kind == "Sample":
             sid = f"{prefix}_{sample_load}_{s['name']}"
-            queue_rows.append(make_row(well_to_vial(s["well"], sample_slot), sid, sample_path,
-                                       sep_method, inj_method, ms_method, proc_method))
+            queue_rows.append(make_row(well_to_vial(s["well"], sample_slot, n_cols), sid,
+                                       sample_path, sep_method, inj_method,
+                                       ms_method, proc_method))
             block_of[s["name"]] = f"Block {block_no}"
             in_block = True
         elif kind == "K562":
@@ -493,20 +509,21 @@ def build_queue_scp(samples, p) -> dict:
                 block_no += 1
                 in_block = False
 
-    # Spares
+    # Spares, numbered on from the injections actually in the queue
+    used = dict(counts)
     for i in range(1, k562_sp + 1):
-        n = counts["K562"] + i
         _, slot, pos = _ctrl_vial("K562")
-        ctrl_entries.append((slot, pos, "K562", f"{prefix}_{k562_load}_K562_{n}_spare", False))
+        ctrl_entries.append((slot, pos, "K562",
+                             f"{prefix}_{k562_load}_K562_{used['K562'] + i}_spare", False))
     for i in range(1, supermix_sp + 1):
-        n = counts["Supermix"] + i
         _, slot, pos = _ctrl_vial("Supermix")
         ctrl_entries.append((slot, pos, "Supermix",
-                             f"{prefix}_{supermix_load}_Supermix_{n}_spare", False))
+                             f"{prefix}_{supermix_load}_Supermix_{used['Supermix'] + i}_spare",
+                             False))
     for i in range(1, blank_sp + 1):
-        n = counts["Blank"] + i
         _, slot, pos = _ctrl_vial("Blank")
-        ctrl_entries.append((slot, pos, "Blank", f"{prefix}_Blank_{n}_spare", False))
+        ctrl_entries.append((slot, pos, "Blank",
+                             f"{prefix}_Blank_{used['Blank'] + i}_spare", False))
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -520,7 +537,7 @@ def build_queue_scp(samples, p) -> dict:
     sample_png = plot_sample_plate(
         [{"well": s["well"], "name": s["name"],
           "group": block_of.get(s["name"], "unused")} for s in samples],
-        f"{sample_slot} - Cells by run block",
+        f"{sample_slot} - Cells by run block", rows=s_rows, cols=s_cols,
     )
 
     ctrl_grids, ctrl_cmap, ctrl_lmap = {}, {}, {}
@@ -542,7 +559,7 @@ def build_queue_scp(samples, p) -> dict:
         "sample_png":  sample_png,
         "ctrl_pngs":   ctrl_pngs,
         "n_queue":     len(queue_rows),
-        "counts":      counts,
+        "counts":      used,
         "spares":      {"K562": k562_sp, "Supermix": supermix_sp, "Blank": blank_sp},
     }
 
@@ -605,6 +622,9 @@ SLOT_OPTIONS = [f"Slot{i}" for i in range(1, 13)]
 with st.expander("Slot assignment", expanded=True):
     sa1, sa2 = st.columns(2)
     _ctrl_word      = "Standards" if mode == "SCP" else "Controls"
+    plate_format    = sa1.selectbox("Sample plate format", list(PLATE_FORMATS.keys()),
+                                    index=1 if mode == "SCP" else 0, key="plate_fmt",
+                                    help=f"{_ctrl_word} plate is always 96 well.")
     sample_slot     = sa1.selectbox("Sample slot", SLOT_OPTIONS, index=0, key="s_slot")
     ctrl_slot_start = int(sa2.selectbox(f"{_ctrl_word} start slot", SLOT_OPTIONS, index=1,
                                         key="c_slot").replace("Slot", ""))
@@ -613,8 +633,9 @@ st.divider()
 
 # CSV upload
 st.subheader("Sample List")
-st.caption("Upload a CSV with at minimum columns `sample_name` and `well` (e.g. A1, H12)."
-           " Optionally include a `group` column.")
+st.caption("Upload a CSV with `sample_name` and `well`, or a CellenONE style file with "
+           "`Location` and `Event Id` (sample name becomes Location_EventId). "
+           "Optionally include a `group` column.")
 
 uploaded = st.file_uploader("Upload CSV", type=["csv"], key="csv_upload")
 
@@ -634,14 +655,25 @@ if st.session_state.msq_csv_hash != csv_hash:
 df = pd.read_csv(io.BytesIO(csv_bytes))
 df.columns = [c.strip().lower() for c in df.columns]
 
-if "sample_name" not in df.columns or "well" not in df.columns:
-    st.error("CSV must have `sample_name` and `well` columns.")
+well_col  = next((c for c in ("well", "location") if c in df.columns), None)
+event_col = next((c for c in ("event id", "event_id", "eventid") if c in df.columns), None)
+
+if well_col is None:
+    st.error("CSV must have a `well` or `Location` column.")
+    st.stop()
+if "sample_name" not in df.columns and event_col is None:
+    st.error("CSV must have `sample_name`, or `Location` plus `Event Id`.")
     st.stop()
 
 samples = []
 for _, row in df.iterrows():
-    name = str(row["sample_name"]).strip()
-    well = str(row["well"]).strip()
+    well = str(row[well_col]).strip()
+    if "sample_name" in df.columns:
+        name = str(row["sample_name"]).strip()
+    else:
+        ev   = str(row[event_col]).strip()
+        ev   = ev[:-2] if ev.endswith(".0") else ev
+        name = f"{well}_{ev}"
     grp  = str(row.get("group", suggest_group(name))).strip() if "group" in df.columns \
            else suggest_group(name)
     if name and well:
@@ -742,6 +774,7 @@ if st.button("Generate queue", type="primary", key="gen"):
         ms_method=ms_method, proc_method=proc_method,
         sample_path=sample_path, blank_path=blank_path,
         sample_slot=sample_slot, ctrl_slot_start=ctrl_slot_start,
+        plate_format=plate_format,
         randomize_order=randomize_order, block_size=block_size, run_seed=run_seed,
         std_interval=std_interval,
     )
