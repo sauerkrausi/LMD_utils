@@ -36,6 +36,8 @@ st.set_page_config(page_title="L2 MS Queue", layout="wide")
 ROWS      = list("ABCDEFGH")
 COLS      = list(range(1, 13))
 GROUP_SIZE = 6
+SCP_BLANK_EVERY = 12
+SCP_STD_EVERY   = 24
 
 LC_METHODS = {
     "WhisperZOOM40": (
@@ -376,10 +378,183 @@ def build_zip(res, stem) -> bytes:
 
 
 # ============================================================
+# SCP QUEUE BUILDER
+# ============================================================
+def scp_run_events(samples, p):
+    """Flat SCP run: randomized cells, a Blank after every block, a standard after
+    every std_interval cells, each standard followed by a Blank. Cells only count."""
+    blank_every  = max(1, int(p.get("block_size", SCP_BLANK_EVERY)))
+    std_every    = max(1, int(p.get("std_interval", SCP_STD_EVERY)))
+    use_k562     = p["use_k562"]
+    use_supermix = p["use_supermix"]
+    std_on       = use_k562 or use_supermix
+
+    order = list(samples)
+    if p.get("randomize_order", True):
+        random.Random(int(p.get("run_seed", 42))).shuffle(order)
+
+    events = []
+
+    def add_standards():
+        if use_k562:
+            events.append(("K562", None))
+        if use_supermix:
+            events.append(("Supermix", None))
+
+    add_standards()
+    events.append(("Blank", None))
+
+    since_std = 0
+    for i in range(0, len(order), blank_every):
+        batch = order[i:i + blank_every]
+        events.extend(("Sample", s) for s in batch)
+        since_std += len(batch)
+        if std_on and since_std >= std_every:
+            add_standards()
+            since_std = 0
+        events.append(("Blank", None))
+    return events
+
+
+def build_queue_scp(samples, p) -> dict:
+    """SCP queue. Same output shape as build_queue."""
+    date          = p["date"]
+    initials      = p["initials"]
+    lc_short      = p["lc_short"]
+    ms_short      = p["ms_short"]
+    sample_load   = p["sample_load"]
+    k562_load     = p.get("k562_load", "")
+    supermix_load = p.get("supermix_load", "")
+    use_k562      = p["use_k562"]
+    use_supermix  = p["use_supermix"]
+    sep_method    = p["sep_method"]
+    inj_method    = p["inj_method"]
+    ms_method     = p["ms_method"]
+    proc_method   = p["proc_method"]
+    sample_path   = p["sample_path"]
+    blank_path    = p["blank_path"]
+    sample_slot   = p.get("sample_slot", "Slot1")
+    ctrl_slot_start = int(p.get("ctrl_slot_start", 2))
+
+    events = scp_run_events(samples, p)
+
+    # Counts come from the built sequence
+    k562_used     = sum(1 for k, _ in events if k == "K562")
+    supermix_used = sum(1 for k, _ in events if k == "Supermix")
+    blank_used    = sum(1 for k, _ in events if k == "Blank")
+
+    k562_sp     = max(3, math.ceil(k562_used     * 0.10)) if use_k562     else 0
+    supermix_sp = max(3, math.ceil(supermix_used * 0.10)) if use_supermix else 0
+    blank_sp    = max(3, math.ceil(blank_used    * 0.10))
+
+    k562_rows     = math.ceil((k562_used + k562_sp)         / 12) if use_k562     else 0
+    supermix_rows = math.ceil((supermix_used + supermix_sp) / 12) if use_supermix else 0
+    blank_offset  = (k562_rows + supermix_rows) * 12
+
+    counts       = {"K562": 0, "Supermix": 0, "Blank": 0}
+    ctrl_entries = []
+    queue_rows   = []
+
+    def _ctrl_vial(ctype):
+        offsets = {"K562": 0, "Supermix": k562_rows * 12, "Blank": blank_offset}
+        counts[ctype] += 1
+        abs_pos  = offsets[ctype] + counts[ctype]
+        slot     = ctrl_slot_start + (abs_pos - 1) // 96
+        slot_pos = ((abs_pos - 1) % 96) + 1
+        return f"Slot{slot}:{slot_pos}", slot, slot_pos
+
+    def add_ctrl(ctype, sid, in_queue=True):
+        vial, slot, pos = _ctrl_vial(ctype)
+        ctrl_entries.append((slot, pos, ctype, sid, in_queue))
+        if in_queue:
+            dp = blank_path if ctype == "Blank" else sample_path
+            queue_rows.append(make_row(vial, sid, dp, sep_method, inj_method,
+                                       ms_method, proc_method))
+
+    prefix   = f"{date}_{initials}_{lc_short}_{ms_short}"
+    block_no = 1
+    in_block = False
+    block_of = {}
+
+    for kind, s in events:
+        if kind == "Sample":
+            sid = f"{prefix}_{sample_load}_{s['name']}"
+            queue_rows.append(make_row(well_to_vial(s["well"], sample_slot), sid, sample_path,
+                                       sep_method, inj_method, ms_method, proc_method))
+            block_of[s["name"]] = f"Block {block_no}"
+            in_block = True
+        elif kind == "K562":
+            add_ctrl("K562", f"{prefix}_{k562_load}_K562_{counts['K562'] + 1}")
+        elif kind == "Supermix":
+            add_ctrl("Supermix", f"{prefix}_{supermix_load}_Supermix_{counts['Supermix'] + 1}")
+        else:
+            add_ctrl("Blank", f"{prefix}_Blank_{counts['Blank'] + 1}")
+            if in_block:
+                block_no += 1
+                in_block = False
+
+    # Spares
+    for i in range(1, k562_sp + 1):
+        n = counts["K562"] + i
+        _, slot, pos = _ctrl_vial("K562")
+        ctrl_entries.append((slot, pos, "K562", f"{prefix}_{k562_load}_K562_{n}_spare", False))
+    for i in range(1, supermix_sp + 1):
+        n = counts["Supermix"] + i
+        _, slot, pos = _ctrl_vial("Supermix")
+        ctrl_entries.append((slot, pos, "Supermix",
+                             f"{prefix}_{supermix_load}_Supermix_{n}_spare", False))
+    for i in range(1, blank_sp + 1):
+        n = counts["Blank"] + i
+        _, slot, pos = _ctrl_vial("Blank")
+        ctrl_entries.append((slot, pos, "Blank", f"{prefix}_Blank_{n}_spare", False))
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(QUEUE_COLS)
+    for row in queue_rows:
+        ws.append([row.get(col, "") for col in QUEUE_COLS])
+    xbuf = io.BytesIO()
+    wb.save(xbuf)
+
+    # Sample plate coloured by run block
+    sample_png = plot_sample_plate(
+        [{"well": s["well"], "name": s["name"],
+          "group": block_of.get(s["name"], "unused")} for s in samples],
+        f"{sample_slot} - Cells by run block",
+    )
+
+    ctrl_grids, ctrl_cmap, ctrl_lmap = {}, {}, {}
+    for slot, pos, ctype, sid, in_queue in ctrl_entries:
+        if slot not in ctrl_grids:
+            ctrl_grids[slot] = {r: {c: "" for c in COLS} for r in ROWS}
+        r, c = index_to_well(pos)
+        ctrl_grids[slot][r][c] = sid
+        ctrl_cmap[sid] = (CTRL_COLORS if in_queue else CTRL_COLORS_SPARE).get(ctype, "white")
+        ctrl_lmap[sid] = f"{ctype}\n{sid.split('_')[-1]}"
+
+    ctrl_pngs = {slot_num: plot_plate_png(grid, ctrl_cmap, f"Slot{slot_num} - Standards",
+                                          label_map=ctrl_lmap)
+                 for slot_num, grid in ctrl_grids.items()}
+
+    return {
+        "queue_xlsx":  xbuf.getvalue(),
+        "queue_rows":  queue_rows,
+        "sample_png":  sample_png,
+        "ctrl_pngs":   ctrl_pngs,
+        "n_queue":     len(queue_rows),
+        "counts":      counts,
+        "spares":      {"K562": k562_sp, "Supermix": supermix_sp, "Blank": blank_sp},
+    }
+
+
+# ============================================================
 # APP
 # ============================================================
-st.title("L2 MS Queue")
+st.title("L2 msQ")
 st.caption("Standalone MS queue generator. Input: CSV with `sample_name` and `well` columns.")
+
+mode = st.radio("Mode", ["Bulk", "SCP"], horizontal=True, key="mode",
+                help="SCP: randomized single cell proteomics run with standards on a fixed interval.")
 
 for key in ("msq_results", "msq_zip", "msq_csv_hash", "msq_group_assignments"):
     if key not in st.session_state:
@@ -429,8 +604,9 @@ with st.expander("Data paths", expanded=True):
 SLOT_OPTIONS = [f"Slot{i}" for i in range(1, 13)]
 with st.expander("Slot assignment", expanded=True):
     sa1, sa2 = st.columns(2)
-    sample_slot     = sa1.selectbox("Sample slot",        SLOT_OPTIONS, index=0, key="s_slot")
-    ctrl_slot_start = int(sa2.selectbox("Controls start slot", SLOT_OPTIONS, index=1,
+    _ctrl_word      = "Standards" if mode == "SCP" else "Controls"
+    sample_slot     = sa1.selectbox("Sample slot", SLOT_OPTIONS, index=0, key="s_slot")
+    ctrl_slot_start = int(sa2.selectbox(f"{_ctrl_word} start slot", SLOT_OPTIONS, index=1,
                                         key="c_slot").replace("Slot", ""))
 
 st.divider()
@@ -475,70 +651,86 @@ samples.sort(key=lambda s: well_sort_key(s["well"]))
 
 st.success(f"{len(samples)} samples loaded from `{uploaded.name}`.")
 
-# Group assignment editor
-st.subheader("Group Assignments")
-st.caption("Groups auto-suggested from sample names. Edit **Group** to reassign.")
+if mode == "Bulk":
+    # Group assignment editor
+    st.subheader("Group Assignments")
+    st.caption("Groups auto-suggested from sample names. Edit **Group** to reassign.")
 
-confirmed = st.session_state.msq_group_assignments or {}
-init_data = [
-    {"Sample": s["name"], "Well": s["well"],
-     "Group": confirmed.get(s["name"]) or s["group"]}
-    for s in samples
-]
+    confirmed = st.session_state.msq_group_assignments or {}
+    init_data = [
+        {"Sample": s["name"], "Well": s["well"],
+         "Group": confirmed.get(s["name"]) or s["group"]}
+        for s in samples
+    ]
 
-group_counts = {}
-for row in init_data:
-    g = row["Group"]
-    group_counts[g] = group_counts.get(g, 0) + 1
-gcols = st.columns(max(len(group_counts), 1))
-for i, (g, n) in enumerate(sorted(group_counts.items())):
-    gcols[i % len(gcols)].metric(g, f"{n} ROIs")
+    group_counts = {}
+    for row in init_data:
+        g = row["Group"]
+        group_counts[g] = group_counts.get(g, 0) + 1
+    gcols = st.columns(max(len(group_counts), 1))
+    for i, (g, n) in enumerate(sorted(group_counts.items())):
+        gcols[i % len(gcols)].metric(g, f"{n} ROIs")
 
-# Divide helper
-_d1, _d2, _d3 = st.columns([2, 1, 1])
-split_grp = _d1.selectbox("Divide group", sorted(group_counts.keys()), key="split_grp")
-split_n   = _d2.number_input("Into N parts", min_value=2, max_value=20, value=2, step=1,
-                              key="split_n")
-if _d3.button("Divide", key="split_btn", use_container_width=True):
-    rois = [r["Sample"] for r in init_data if r["Group"] == split_grp]
-    chunk = math.ceil(len(rois) / int(split_n))
-    updated = {r["Sample"]: r["Group"] for r in init_data}
-    for i, roi in enumerate(rois):
-        updated[roi] = f"{split_grp}{chr(ord('a') + i // chunk)}"
-    st.session_state.msq_group_assignments = updated
-    st.session_state.msq_results           = None
+    # Divide helper
+    _d1, _d2, _d3 = st.columns([2, 1, 1])
+    split_grp = _d1.selectbox("Divide group", sorted(group_counts.keys()), key="split_grp")
+    split_n   = _d2.number_input("Into N parts", min_value=2, max_value=20, value=2, step=1,
+                                  key="split_n")
+    if _d3.button("Divide", key="split_btn", use_container_width=True):
+        rois = [r["Sample"] for r in init_data if r["Group"] == split_grp]
+        chunk = math.ceil(len(rois) / int(split_n))
+        updated = {r["Sample"]: r["Group"] for r in init_data}
+        for i, roi in enumerate(rois):
+            updated[roi] = f"{split_grp}{chr(ord('a') + i // chunk)}"
+        st.session_state.msq_group_assignments = updated
+        st.session_state.msq_results           = None
 
-edited = st.data_editor(
-    pd.DataFrame(init_data),
-    column_config={
-        "Sample": st.column_config.TextColumn("Sample", disabled=True),
-        "Well":   st.column_config.TextColumn("Well",   disabled=True),
-        "Group":  st.column_config.TextColumn("Group"),
-    },
-    hide_index=True, use_container_width=True, key="grp_editor"
-)
-new_assignments = dict(zip(edited["Sample"], edited["Group"]))
+    edited = st.data_editor(
+        pd.DataFrame(init_data),
+        column_config={
+            "Sample": st.column_config.TextColumn("Sample", disabled=True),
+            "Well":   st.column_config.TextColumn("Well",   disabled=True),
+            "Group":  st.column_config.TextColumn("Group"),
+        },
+        hide_index=True, use_container_width=True, key="grp_editor"
+    )
+    new_assignments = dict(zip(edited["Sample"], edited["Group"]))
 
-if st.button("Confirm grouping", type="primary", key="confirm"):
-    st.session_state.msq_group_assignments = new_assignments
-    st.session_state.msq_results           = None
-    st.rerun()
+    if st.button("Confirm grouping", type="primary", key="confirm"):
+        st.session_state.msq_group_assignments = new_assignments
+        st.session_state.msq_results           = None
+        st.rerun()
 
-if not st.session_state.msq_group_assignments:
-    st.info("Confirm grouping above to continue.")
-    st.stop()
+    if not st.session_state.msq_group_assignments:
+        st.info("Confirm grouping above to continue.")
+        st.stop()
 
-group_assignments = st.session_state.msq_group_assignments
+    group_assignments = st.session_state.msq_group_assignments
+else:
+    group_assignments = {}
 
 st.divider()
 st.subheader("Run Order")
-_ro1, _ro2, _ro3 = st.columns(3)
-randomize_order = _ro1.checkbox("Randomize sample order within groups", value=False,
-                                key="randomize")
-block_size = _ro2.number_input("Blank interval (samples per block)", min_value=1,
-                               max_value=50, value=GROUP_SIZE, step=1, key="block_size")
-run_seed = _ro3.number_input("Random seed", min_value=0, max_value=9999, value=42,
-                             step=1, key="run_seed", disabled=not randomize_order)
+if mode == "SCP":
+    st.caption("Randomized run. Blank after every block, standard after every "
+               "standard interval, each standard followed by a Blank.")
+    _ro1, _ro2, _ro3, _ro4 = st.columns(4)
+    randomize_order = _ro1.checkbox("Randomize run order", value=True, key="randomize_scp")
+    block_size = _ro2.number_input("Blank interval (cells)", min_value=1, max_value=96,
+                                   value=SCP_BLANK_EVERY, step=1, key="block_size_scp")
+    std_interval = _ro3.number_input("Standard interval (cells)", min_value=1, max_value=192,
+                                     value=SCP_STD_EVERY, step=1, key="std_interval_scp")
+    run_seed = _ro4.number_input("Random seed", min_value=0, max_value=9999, value=42,
+                                 step=1, key="run_seed_scp", disabled=not randomize_order)
+else:
+    _ro1, _ro2, _ro3 = st.columns(3)
+    randomize_order = _ro1.checkbox("Randomize sample order within groups", value=False,
+                                    key="randomize")
+    block_size = _ro2.number_input("Blank interval (samples per block)", min_value=1,
+                                   max_value=50, value=GROUP_SIZE, step=1, key="block_size")
+    run_seed = _ro3.number_input("Random seed", min_value=0, max_value=9999, value=42,
+                                 step=1, key="run_seed", disabled=not randomize_order)
+    std_interval = 0
 
 st.divider()
 if st.button("Generate queue", type="primary", key="gen"):
@@ -551,9 +743,11 @@ if st.button("Generate queue", type="primary", key="gen"):
         sample_path=sample_path, blank_path=blank_path,
         sample_slot=sample_slot, ctrl_slot_start=ctrl_slot_start,
         randomize_order=randomize_order, block_size=block_size, run_seed=run_seed,
+        std_interval=std_interval,
     )
     with st.spinner("Generating..."):
-        res = build_queue(samples, group_assignments, params)
+        res = (build_queue_scp(samples, params) if mode == "SCP"
+               else build_queue(samples, group_assignments, params))
         st.session_state.msq_results = res
         st.session_state.msq_zip     = build_zip(res, stem)
 
@@ -577,7 +771,7 @@ with img_cols[0]:
     st.image(res["sample_png"], use_container_width=True)
 for i, (slot_num, png) in enumerate(res["ctrl_pngs"].items()):
     with img_cols[i + 1]:
-        st.subheader(f"Slot{slot_num} Controls")
+        st.subheader(f"Slot{slot_num} {'Standards' if mode == 'SCP' else 'Controls'}")
         st.image(png, use_container_width=True)
 
 st.subheader("Downloads")
