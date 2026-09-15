@@ -49,6 +49,10 @@ LC_METHODS = {
         r"D:\Methods\LC_Methods\Evosep"
         r"\WhisperZOOM_40_SPD_32p5min.m?HyStar_LC"
     ),
+    "Elite19min": (
+        r"D:\Methods\LC_Methods\nanoElute\Ionopticks Elite"
+        r"\2uL_resus_19min_total_Elite.m?HyStar_LC"
+    ),
 }
 MS_METHODS = {
     "diaPASEF": (
@@ -58,6 +62,12 @@ MS_METHODS = {
         r"D:\Methods\MS_Methods\DIA\Farah\TimsControl methods"
         r"\DIA_PASEF_Var_windows_test4_pydiAID_300to1200_80PASEF_scans_-05shift"
         r".proteoscape.m?DataAnalysis",
+    ),
+    "diaPASEF_SC": (
+        r"D:\Methods\MS_Methods\DIA\Farah\TimsControl methods\Single_cell_Methods"
+        r"\1F_1diagonal_1ms1_150mz_600ms_ramp.proteoscape.m?OtofImpacTEMControl",
+        r"D:\Methods\MS_Methods\DIA\Farah\TimsControl methods\Single_cell_Methods"
+        r"\1F_1diagonal_1ms1_150mz_600ms_ramp.proteoscape.m?DataAnalysis",
     ),
 }
 LC_OPTIONS = list(LC_METHODS.keys()) + ["Custom"]
