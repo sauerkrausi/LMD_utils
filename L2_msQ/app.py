@@ -638,14 +638,19 @@ with st.expander("Instrument method paths", expanded=False):
 
 _year      = date[:4]
 _month_str = datetime.datetime.strptime(date, "%Y%m%d").strftime("%m %B")
+_def_spath = rf"D:\Data\{_year}\{_month_str}\Sample\{initials}"
+_def_bpath = rf"D:\Data\{_year}\{_month_str}\Blank"
+
+# Rebuild the defaults when initials or month change
+if st.session_state.get("_paths_key") != (initials, _month_str):
+    st.session_state["spath"]      = _def_spath
+    st.session_state["bpath"]      = _def_bpath
+    st.session_state["_paths_key"] = (initials, _month_str)
+
 with st.expander("Data paths", expanded=True):
     cp1, cp2    = st.columns(2)
-    sample_path = cp1.text_input("Sample / control path",
-                                 value=rf"D:\Data\{_year}\{_month_str}\Sample\{initials}",
-                                 key="spath")
-    blank_path  = cp2.text_input("Blank path",
-                                 value=rf"D:\Data\{_year}\{_month_str}\Blank",
-                                 key="bpath")
+    sample_path = cp1.text_input("Sample / control path", value=_def_spath, key="spath")
+    blank_path  = cp2.text_input("Blank path",            value=_def_bpath, key="bpath")
 
 SLOT_OPTIONS = [f"Slot{i}" for i in range(1, 13)]
 with st.expander("Slot assignment", expanded=True):
