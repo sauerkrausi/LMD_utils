@@ -255,13 +255,18 @@ def build_cutting_list(well_map: dict, groups_dict: dict = None) -> bytes:
     return buf.getvalue().encode("utf-8")
 
 
-def build_xml_zip(plate_xml_list: list, well_map: dict, stem: str) -> bytes:
-    """Zip all plate XMLs + samples_and_wells.json."""
+def build_xml_zip(plate_xml_list: list, well_map: dict, stem: str,
+                  png_map: dict = None, cutting_csv: bytes = None) -> bytes:
+    """Zip all plate XMLs, plate map PNGs, cutting list and samples_and_wells.json."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for plate_label, xml_bytes in plate_xml_list:
             z.writestr(f"{stem}_{plate_label}.xml", xml_bytes)
-        z.writestr("samples_and_wells.json",
+        for plate_label, png_bytes in (png_map or {}).items():
+            z.writestr(f"{stem}_{plate_label}_platemap.png", png_bytes)
+        if cutting_csv:
+            z.writestr(f"{stem}_cutting_list.csv", cutting_csv)
+        z.writestr(f"{stem}_samples_and_wells.json",
                    json.dumps(well_map, indent=2))
     return buf.getvalue()
 
@@ -685,7 +690,9 @@ def render_convert_tab():
     if st.button("Convert to XML", type="primary", disabled=not calib_ok):
         with st.spinner(f"Building {len(plate_labels)} plate(s)..."):
             plate_xml_list = build_xml_plates(calib_pts, polygons, well_map)
-            zip_bytes      = build_xml_zip(plate_xml_list, well_map, stem)
+            zip_bytes      = build_xml_zip(plate_xml_list, well_map, stem,
+                                           png_map=st.session_state.get("t2_png_map"),
+                                           cutting_csv=cutting_csv)
 
         st.session_state.t2_plates = plate_xml_list
         st.session_state.t2_saw    = well_map
