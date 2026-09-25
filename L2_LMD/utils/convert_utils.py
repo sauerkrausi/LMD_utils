@@ -18,6 +18,7 @@ import io
 import json
 import os
 import random
+import re
 import tempfile
 import zipfile
 
@@ -106,6 +107,12 @@ def count_inside_triangle(calib_pts: np.ndarray, polygons: list):
     )
 
 
+def natural_key(name: str):
+    """Sort key that orders embedded numbers numerically: ROI_2 before ROI_10."""
+    return tuple(int(t) if t.isdigit() else t.lower()
+                 for t in re.split(r'(\d+)', str(name)))
+
+
 def assign_wells(polygons: list, randomize: bool = False, seed: int = 42,
                  balance: bool = False, groups_dict: dict = None,
                  plate_type: str = "96", well_list: list = None) -> dict:
@@ -122,7 +129,7 @@ def assign_wells(polygons: list, randomize: bool = False, seed: int = 42,
         wells = ALL_WELLS
     capacity = len(wells)
 
-    names    = sorted(set(p["name"] for p in polygons))
+    names    = sorted(set(p["name"] for p in polygons), key=natural_key)
     n        = len(names)
     n_plates = max(1, math.ceil(n / capacity))
 
@@ -153,7 +160,7 @@ def assign_wells(polygons: list, randomize: bool = False, seed: int = 42,
 
     result = {}
     for plate_idx in range(n_plates):
-        plate_names = sorted(plate_name_lists[plate_idx])
+        plate_names = sorted(plate_name_lists[plate_idx], key=natural_key)
         for j, name in enumerate(plate_names):
             # If a group exceeds plate capacity, spill onto the next plate number
             result[name] = f"Plate{plate_idx + 1 + j // capacity}_{wells[j % capacity]}"
@@ -570,7 +577,7 @@ def render_convert_tab():
     with st.expander("ROI-level assignment", expanded=True):
         st.caption("Pre-filled from prefix table above. Edit **Group** to override per ROI.")
         roi_rows = []
-        for p in sorted(polygons, key=lambda x: x["name"]):
+        for p in sorted(polygons, key=lambda x: natural_key(x["name"])):
             name = p["name"]
             pfx  = _match_prefix(name)
             grp  = new_prefix_group.get(pfx, group_options[0])
@@ -644,7 +651,8 @@ def render_convert_tab():
             with col_tbl:
                 with st.expander("Table", expanded=False):
                     st.dataframe(
-                        [{"Annotation": k, "Well": v} for k, v in sorted(pwm.items())],
+                        [{"Annotation": k, "Well": v}
+                         for k, v in sorted(pwm.items(), key=lambda kv: natural_key(kv[0]))],
                         use_container_width=True, hide_index=True
                     )
             with col_plate:
