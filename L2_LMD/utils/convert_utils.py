@@ -46,10 +46,10 @@ except ImportError:
 
 ROWS      = list("ABCDEFGH")
 COLS      = list(range(1, 13))
-ALL_WELLS = [f"{r}{c}" for r in ROWS for c in COLS]   # A1 .. H12  (96-well)
+ALL_WELLS = [f"{r}{c:02d}" for r in ROWS for c in COLS]   # A01 .. H12  (96-well)
 
 ROWS_384      = list("ABCDEFGHIJKLMNOP")
-ALL_WELLS_384 = [f"{r}{c}" for r in ROWS_384 for c in range(1, 25)]  # A1 .. P24 (384-well)
+ALL_WELLS_384 = [f"{r}{c:02d}" for r in ROWS_384 for c in range(1, 25)]  # A01 .. P24 (384-well)
 
 
 def get_available_wells_384(margin: int = 1, space_rows: int = 1, space_cols: int = 1) -> list:
@@ -61,7 +61,7 @@ def get_available_wells_384(margin: int = 1, space_rows: int = 1, space_cols: in
     avail_cols = list(range(1, 25))[margin : 24 - margin]  if margin else list(range(1, 25))
     used_rows  = avail_rows[::max(1, space_rows)]
     used_cols  = avail_cols[::max(1, space_cols)]
-    return [f"{r}{c}" for r in used_rows for c in used_cols]
+    return [f"{r}{c:02d}" for r in used_rows for c in used_cols]
 
 
 # ============================================================
@@ -249,9 +249,10 @@ def build_cutting_list(well_map: dict, groups_dict: dict = None) -> bytes:
     rows.sort(key=lambda r: (r[0], _wkey(r[1])))
     buf = io.StringIO()
     w   = _csv.writer(buf)
-    w.writerow(["Plate", "Well", "ROI", "Group"])
+    # Dropout and Comments stay empty, filled in at the microscope and read back in Tab 3
+    w.writerow(["Plate", "Well", "ROI", "Group", "Dropout {Y/N}", "Comments"])
     for row in rows:
-        w.writerow(row)
+        w.writerow(list(row) + ["", ""])
     return buf.getvalue().encode("utf-8")
 
 
@@ -318,7 +319,7 @@ def plot_well_preview(well_map: dict, title: str, plate_type: str = "96",
         for c_idx, c in enumerate(p_cols):
             x    = c_idx
             y    = (n_rows - 1) - r_idx
-            well = f"{r}{c}"
+            well = f"{r}{c:02d}"
             name = well_to_name.get(well, "")
             grp  = name.split("_")[0] if name else ""
             sg   = name.split("-")[0] if name else ""
