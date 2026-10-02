@@ -239,6 +239,45 @@ def render_process_tab():
             lambda v: True if str(v).strip().upper() == "Y" else False
         )
 
+    # Optional: read dropouts back from a filled cutting list
+    cut_csv = st.file_uploader(
+        "Upload filled cutting list (optional — pre-ticks the dropouts below)",
+        type=["csv"], key="proc_upload_cutlist"
+    )
+    if cut_csv is not None:
+        try:
+            cut_df = pd.read_csv(io.BytesIO(cut_csv.getvalue()))
+            cut_df.columns = [c.strip() for c in cut_df.columns]
+            if "ROI" not in cut_df.columns or dropout_col not in cut_df.columns:
+                st.error(f"Cutting list needs `ROI` and `{dropout_col}` columns.")
+            else:
+                flags = {
+                    str(r["ROI"]).strip(): str(r[dropout_col]).strip().upper() == "Y"
+                    for _, r in cut_df.iterrows()
+                }
+                unknown = sorted(set(flags) - set(df["ROI"].astype(str).str.strip()))
+                df[dropout_col] = df.apply(
+                    lambda r: flags.get(str(r["ROI"]).strip(), r[dropout_col]), axis=1
+                )
+                st.success(f"{sum(flags.values())} dropout(s) read from `{cut_csv.name}`.")
+                if unknown:
+                    st.warning(f"{len(unknown)} ROI(s) in the cutting list are not in this "
+                               f"sample list and were ignored: {', '.join(unknown[:5])}"
+                               + (" ..." if len(unknown) > 5 else ""))
+                if "Comments" in cut_df.columns and "comments" in df.columns:
+                    notes = {
+                        str(r["ROI"]).strip(): str(r["Comments"]).strip()
+                        for _, r in cut_df.iterrows()
+                        if str(r.get("Comments", "")).strip() not in ("", "nan")
+                    }
+                    if notes:
+                        df["comments"] = df.apply(
+                            lambda r: notes.get(str(r["ROI"]).strip(), r["comments"]), axis=1
+                        )
+                        st.caption(f"{len(notes)} comment(s) carried over.")
+        except Exception as e:
+            st.error(f"Could not read cutting list: {e}")
+
     n_rois = len(df)
     n_plates = df["Plate"].nunique() if "Plate" in df.columns else 1
 
