@@ -276,10 +276,10 @@ def build_xml_zip(plate_xml_list: list, well_map: dict, stem: str,
 # 96-WELL PLATE PREVIEW
 # ============================================================
 def plot_well_preview(well_map: dict, title: str, plate_type: str = "96",
-                      available_wells: set = None) -> bytes:
+                      available_wells: set = None, split_re: str = r"[-_]") -> bytes:
     """well_map: {name: 'A1'} for a single plate.
     plate_type: '96' or '384'.
-    Outer ring = supergroup (first hyphen segment); fill = group (underscore prefix)."""
+    Outer ring = supergroup (name up to the first split char); fill = group."""
     is_384 = plate_type == "384"
     p_rows = ROWS_384 if is_384 else ROWS
     p_cols = list(range(1, 25)) if is_384 else COLS
@@ -289,7 +289,7 @@ def plot_well_preview(well_map: dict, title: str, plate_type: str = "96",
     palette      = cm.tab20
     group_color  = {g: palette(i / max(len(groups), 1)) for i, g in enumerate(groups)}
 
-    supergroups  = sorted({n.split("-")[0] for n in well_map})
+    supergroups  = sorted({re.split(split_re, n, maxsplit=1)[0] for n in well_map})
     sg_palette   = cm.tab10
     sg_color     = {sg: sg_palette(i / max(len(supergroups), 1))
                     for i, sg in enumerate(supergroups)}
@@ -322,7 +322,7 @@ def plot_well_preview(well_map: dict, title: str, plate_type: str = "96",
             well = f"{r}{c:02d}"
             name = well_to_name.get(well, "")
             grp  = name.split("_")[0] if name else ""
-            sg   = name.split("-")[0] if name else ""
+            sg   = re.split(split_re, name, maxsplit=1)[0] if name else ""
             if name:
                 ax.add_patch(plt.Circle((x, y), outer_r, color=sg_color.get(sg, "whitesmoke"),
                                         ec="none", zorder=1))
@@ -479,16 +479,31 @@ def render_convert_tab():
 
     # Sample Groups
     st.subheader("Sample Groups")
-    st.caption(
-        "Auto-detected from name prefixes. Edit **Group** to reassign. "
-        "Groups stay together on the same plate and are piped to Tab 4 for MS queue batching."
-    )
 
-    # Auto-detected supergroups: first hyphen-delimited token (e.g. AS20, CH22, H20)
-    supergroups = sorted({p["name"].split("-")[0] for p in polygons})
+    SPLIT_OPTIONS = {
+        "- or _": r"[-_]",
+        "-":      r"[-]",
+        "_":      r"[_]",
+    }
+    sc1, sc2 = st.columns([1, 3])
+    split_label = sc1.selectbox("Supergroup split at", list(SPLIT_OPTIONS.keys()),
+                                index=0, key="t2_split_char")
+    split_re = SPLIT_OPTIONS[split_label]
+
+    with sc2:
+        st.caption(
+            f"Supergroup is the first part of each name, up to the first `{split_label}`. "
+            "Edit **Group** to reassign. Groups stay together on the same plate and are "
+            "piped to Tab 4 for MS queue batching. Add a more specific prefix below to subdivide."
+        )
+
+    def _supergroup(name: str) -> str:
+        return re.split(split_re, name, maxsplit=1)[0] or name
+
+    supergroups = sorted({_supergroup(p["name"]) for p in polygons})
     n_sg        = len(supergroups)
 
-    # Reset on new file
+    # Reset on new file or changed split character
     if st.session_state.get("t2_prefixes") != supergroups:
         st.session_state.t2_prefixes       = supergroups
         st.session_state.t2_extra_prefixes = []
@@ -505,7 +520,7 @@ def render_convert_tab():
         for pfx in all_prefixes:   # longest first — most specific wins
             if roi_name.startswith(pfx):
                 return pfx
-        return roi_name.split("-")[0]
+        return _supergroup(roi_name)
 
     # ROI counts per prefix (recomputed each render so counts update after Add/Remove)
     roi_count = {}
@@ -664,7 +679,8 @@ def render_convert_tab():
             with col_plate:
                 preview_png = plot_well_preview(pwm, f"{pl} — {n_in_plate} ROIs",
                                                plate_type=plate_type_key,
-                                               available_wells=set(well_list_384) if well_list_384 else None)
+                                               available_wells=set(well_list_384) if well_list_384 else None,
+                                               split_re=split_re)
                 png_map[pl] = preview_png
                 st.image(preview_png, use_container_width=True)
                 st.download_button(
