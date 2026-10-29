@@ -683,6 +683,82 @@ def render_convert_tab():
                                 groups_dict=st.session_state.get("t2_groups"),
                                 plate_type=plate_type_key,
                                 well_list=well_list_384)
+    # Multiple ROIs per well
+    wells_avail = (well_list_384 or ALL_WELLS_384) if plate_type_key == "384" else ALL_WELLS
+    multi_well  = st.toggle(
+        "Multiple ROIs per well", value=False, key="t2_multi_well",
+        help="Pool ROIs into shared wells. Pooled ROIs are cut into one cap and become one "
+             "MS sample, named after every ROI that went into it."
+    )
+
+    if multi_well:
+        auto_map   = dict(well_map)
+        saved      = st.session_state.get("t2_well_overrides") or {}
+        cur_map    = {n: saved.get(n, auto_map[n]) for n in auto_map}
+        groups_map = st.session_state.get("t2_groups") or {}
+
+        def _pool_by(key_fn):
+            order, mem = [], {}
+            for name in sorted(auto_map, key=natural_key):
+                k = key_fn(name)
+                if k not in mem:
+                    mem[k] = []
+                    order.append(k)
+                mem[k].append(name)
+            out, cap = {}, len(wells_avail)
+            for i, k in enumerate(order):
+                slot = f"Plate{i // cap + 1}_{wells_avail[i % cap]}"
+                for nm in mem[k]:
+                    out[nm] = slot
+            return out
+
+        pc1, pc2, pc3 = st.columns([2, 1, 1])
+        pool_by = pc1.selectbox("Pool by", ["Group", "Supergroup"], key="t2_pool_by")
+        if pc2.button("Pool", use_container_width=True, key="t2_pool_btn"):
+            key_fn = ((lambda n: groups_map.get(n, _supergroup(n))) if pool_by == "Group"
+                      else _supergroup)
+            st.session_state.t2_well_overrides = _pool_by(key_fn)
+            st.rerun()
+        if pc3.button("Reset", use_container_width=True, key="t2_pool_reset"):
+            st.session_state.t2_well_overrides = {}
+            st.rerun()
+
+        plate_opts = sorted({v.split("_")[0] for v in cur_map.values()} | {"Plate1"})
+        rows = [
+            {"ROI":   n,
+             "Group": groups_map.get(n, _supergroup(n)),
+             "Plate": cur_map[n].split("_")[0],
+             "Well":  "_".join(cur_map[n].split("_")[1:])}
+            for n in sorted(cur_map, key=natural_key)
+        ]
+        edited_wells = st.data_editor(
+            pd.DataFrame(rows),
+            column_config={
+                "ROI":   st.column_config.TextColumn("ROI",   disabled=True),
+                "Group": st.column_config.TextColumn("Group", disabled=True),
+                "Plate": st.column_config.SelectboxColumn("Plate", options=plate_opts),
+                "Well":  st.column_config.SelectboxColumn("Well",  options=wells_avail),
+            },
+            column_order=["ROI", "Group", "Plate", "Well"],
+            hide_index=True, use_container_width=True, key="t2_well_editor",
+        )
+        new_map = {r["ROI"]: f'{r["Plate"]}_{r["Well"]}' for _, r in edited_wells.iterrows()}
+        if new_map != cur_map:
+            st.session_state.t2_well_overrides = new_map
+            st.rerun()
+        well_map = new_map
+
+        pooled = {w: ns for w, ns in well_members(well_map).items() if len(ns) > 1}
+        if pooled:
+            shown = sorted(pooled.items())[:8]
+            st.info(f"{len(pooled)} pooled well(s), {len(well_members(well_map))} well(s) used: "
+                    + "  |  ".join(f"**{w}** ({len(ns)} ROIs)" for w, ns in shown)
+                    + ("  ..." if len(pooled) > 8 else ""))
+        else:
+            st.caption("Nothing pooled yet. Edit **Well** above, or use Pool by.")
+    elif st.session_state.get("t2_well_overrides"):
+        st.session_state.t2_well_overrides = {}
+
     plate_labels = get_plate_labels(well_map)
 
     # Show all plates in tabs
