@@ -58,6 +58,12 @@ def _split_saw_by_plate(saw_dict: dict) -> dict:
     return result
 
 
+def nat_key(name: str):
+    """Sort key that orders embedded numbers numerically."""
+    return tuple(int(t) if t.isdigit() else t.lower()
+                 for t in re.split(r'(\d+)', str(name)))
+
+
 def build_sample_list_from_t2(saw_dict: dict, groups_dict: dict, stem: str) -> bytes:
     """Build sample list CSV directly from Tab 2 well assignments."""
     per_plate = _split_saw_by_plate(saw_dict)
@@ -66,15 +72,23 @@ def build_sample_list_from_t2(saw_dict: dict, groups_dict: dict, stem: str) -> b
     w.writerow(["Plate", "cut order", "ROI", "Well_ID", "Group",
                 "Dropout {Y/N}", "comments", "processed"])
     for plate in sorted(per_plate.keys()):
-        pairs = sorted(per_plate[plate].items(), key=lambda x: well_sort_key(x[1]))
-        for i, (roi, well) in enumerate(pairs, start=1):
-            grp = (groups_dict or {}).get(roi, roi.split("-")[0] if "-" in roi else roi)
-            w.writerow([plate, i, roi, well, grp, "", "", ""])
+        by_well = {}
+        for roi, well in per_plate[plate].items():
+            by_well.setdefault(well, []).append(roi)
+        pairs = sorted(by_well.items(), key=lambda x: well_sort_key(x[0]))
+        for i, (well, rois) in enumerate(pairs, start=1):
+            rois.sort(key=nat_key)
+            label = "+".join(rois)
+            head  = rois[0]
+            grp   = (groups_dict or {}).get(head, head.split("-")[0] if "-" in head else head)
+            w.writerow([plate, i, label, well, grp, "", "", ""])
     return buf.getvalue().encode("utf-8")
 
 
 def build_dropout_free_xmls(plates: list, dropout_rois: set) -> list:
-    """Remove dropout ROIs from each plate XML. Returns [(label, xml_bytes), ...]."""
+    """Remove dropout ROIs from each plate XML. Returns [(label, xml_bytes), ...].
+    A pooled sample label holds several ROI names joined by '+', each its own shape."""
+    dropout_rois = {n.strip() for lbl in dropout_rois for n in str(lbl).split("+") if n.strip()}
     results = []
     shape_pat = re.compile(r'^Shape_\d+$')
 
@@ -255,11 +269,28 @@ def render_process_tab():
                     str(r["ROI"]).strip(): str(r[dropout_col]).strip().upper() == "Y"
                     for _, r in cut_df.iterrows()
                 }
-                unknown = sorted(set(flags) - set(df["ROI"].astype(str).str.strip()))
-                df[dropout_col] = df.apply(
-                    lambda r: flags.get(str(r["ROI"]).strip(), r[dropout_col]), axis=1
-                )
+                known = set()
+                partial = []
+
+                def _apply(row):
+                    mem = [m.strip() for m in str(row["ROI"]).split("+") if m.strip()]
+                    hits = [flags[m] for m in mem if m in flags]
+                    known.update(m for m in mem if m in flags)
+                    if not hits:
+                        return row[dropout_col]
+                    if all(hits):
+                        return True
+                    if any(hits):
+                        partial.append(str(row["ROI"]))
+                    return row[dropout_col]
+
+                df[dropout_col] = df.apply(_apply, axis=1)
+                unknown = sorted(set(flags) - known)
                 st.success(f"{sum(flags.values())} dropout(s) read from `{cut_csv.name}`.")
+                if partial:
+                    st.warning(f"{len(partial)} pooled well(s) had only some ROIs marked as "
+                               f"dropout and were left in: {', '.join(partial[:3])}"
+                               + (" ..." if len(partial) > 3 else ""))
                 if unknown:
                     st.warning(f"{len(unknown)} ROI(s) in the cutting list are not in this "
                                f"sample list and were ignored: {', '.join(unknown[:5])}"
