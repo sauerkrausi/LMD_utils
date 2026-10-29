@@ -82,6 +82,21 @@ def parse_geojson(geojson_bytes: bytes):
     return points, polygons
 
 
+def well_members(well_map: dict) -> dict:
+    """{well: [roi, ...]} with members in natural order. Wells may hold several ROIs."""
+    out = {}
+    for name, w in well_map.items():
+        out.setdefault(w, []).append(name)
+    for w in out:
+        out[w].sort(key=natural_key)
+    return out
+
+
+def pooled_name(rois: list) -> str:
+    """Name of a well, the ROI names joined so provenance stays visible."""
+    return "+".join(rois)
+
+
 def polygon_exterior(geom: dict) -> np.ndarray:
     if geom["type"] == "Polygon":
         ring = geom["coordinates"][0]
@@ -182,11 +197,14 @@ def _build_single_xml(calib_pts: np.ndarray, polygons: list, pwm: dict) -> bytes
     """Build one XML for one plate. pwm: {name: 'A1'}"""
     import xml.etree.ElementTree as ET
 
-    well_to_name = {v: k for k, v in pwm.items()}
-    col          = Collection(calibration_points=calib_pts)
+    col = Collection(calibration_points=calib_pts)
     for p in polygons:
         coords = polygon_exterior(p["geom"])
         col.new_shape(coords, well=pwm.get(p["name"], "A1"), name=p["name"])
+
+    # Shapes are written in the order they were added, so TransferID stays per ROI
+    # even when several shapes share one CapID
+    shape_names = [p["name"] for p in polygons]
 
     with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as f:
         tmppath = f.name
@@ -194,13 +212,15 @@ def _build_single_xml(calib_pts: np.ndarray, polygons: list, pwm: dict) -> bytes
         col.save(tmppath)
         tree = ET.parse(tmppath)
         root = tree.getroot()
+        idx  = 0
         for el in root:
             if not el.tag.startswith("Shape_"):
                 continue
             cap_el = el.find("CapID")
+            sample_name = shape_names[idx] if idx < len(shape_names) else ""
+            idx += 1
             if cap_el is None:
                 continue
-            sample_name = well_to_name.get(cap_el.text.strip() if cap_el.text else "", "")
             if el.find("TransferID") is None and sample_name:
                 children = list(el)
                 cap_pos  = children.index(cap_el)
@@ -294,7 +314,8 @@ def plot_well_preview(well_map: dict, title: str, plate_type: str = "96",
     sg_color     = {sg: sg_palette(i / max(len(supergroups), 1))
                     for i, sg in enumerate(supergroups)}
 
-    well_to_name = {v: k for k, v in well_map.items()}
+    members      = well_members(well_map)
+    well_to_name = {w: pooled_name(ns) for w, ns in members.items()}
 
     if is_384:
         fig, ax = plt.subplots(figsize=(22, 10))
@@ -321,8 +342,12 @@ def plot_well_preview(well_map: dict, title: str, plate_type: str = "96",
             y    = (n_rows - 1) - r_idx
             well = f"{r}{c}"
             name = well_to_name.get(well, "")
-            grp  = name.split("_")[0] if name else ""
-            sg   = re.split(split_re, name, maxsplit=1)[0] if name else ""
+            mems = members.get(well, [])
+            head = mems[0] if mems else ""
+            grp  = head.split("_")[0] if head else ""
+            sg   = re.split(split_re, head, maxsplit=1)[0] if head else ""
+            if len(mems) > 2:
+                name = f"{head}\n+{len(mems) - 1} more"
             if name:
                 ax.add_patch(plt.Circle((x, y), outer_r, color=sg_color.get(sg, "whitesmoke"),
                                         ec="none", zorder=1))
