@@ -269,8 +269,9 @@ def build_cutting_list(well_map: dict, groups_dict: dict = None) -> bytes:
     rows.sort(key=lambda r: (r[0], _wkey(r[1])))
     buf = io.StringIO()
     w   = _csv.writer(buf)
-    # Dropout and Comments stay empty, filled in at the microscope and read back in Tab 3
-    w.writerow(["Plate", "Well", "ROI", "Group", "Dropout {Y/N}", "Comments"])
+    # Dropout and comments stay empty, filled in at the microscope and read back in Tab 3
+    # Column names match the sample list so the two CSVs are interchangeable
+    w.writerow(["Plate", "Well_ID", "ROI", "Group", "Dropout {Y/N}", "comments"])
     for row in rows:
         w.writerow(list(row) + ["", ""])
     return buf.getvalue().encode("utf-8")
