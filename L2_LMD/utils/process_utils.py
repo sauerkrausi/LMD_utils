@@ -245,6 +245,22 @@ def render_process_tab():
     # Parse
     df = pd.read_csv(io.BytesIO(raw_csv))
     df.columns     = [c.strip() for c in df.columns]
+
+    # Accept Well or Well_ID, and either case of comments
+    if "Well_ID" not in df.columns:
+        alt = next((c for c in df.columns
+                    if c.strip().lower().replace(" ", "") in ("well", "wellid", "well_id")), None)
+        if alt:
+            df = df.rename(columns={alt: "Well_ID"})
+    if "comments" not in df.columns and "Comments" in df.columns:
+        df = df.rename(columns={"Comments": "comments"})
+
+    missing = [c for c in ("ROI", "Well_ID") if c not in df.columns]
+    if missing:
+        st.error(f"Sample list is missing required column(s): {', '.join(missing)}. "
+                 f"Found: {', '.join(df.columns)}")
+        return
+
     dropout_col    = "Dropout {Y/N}"
     if dropout_col not in df.columns:
         df[dropout_col] = False
@@ -295,11 +311,12 @@ def render_process_tab():
                     st.warning(f"{len(unknown)} ROI(s) in the cutting list are not in this "
                                f"sample list and were ignored: {', '.join(unknown[:5])}"
                                + (" ..." if len(unknown) > 5 else ""))
-                if "Comments" in cut_df.columns and "comments" in df.columns:
+                note_col = next((c for c in ("comments", "Comments") if c in cut_df.columns), None)
+                if note_col and "comments" in df.columns:
                     notes = {
-                        str(r["ROI"]).strip(): str(r["Comments"]).strip()
+                        str(r["ROI"]).strip(): str(r[note_col]).strip()
                         for _, r in cut_df.iterrows()
-                        if str(r.get("Comments", "")).strip() not in ("", "nan")
+                        if str(r.get(note_col, "")).strip() not in ("", "nan")
                     }
                     if notes:
                         df["comments"] = df.apply(
