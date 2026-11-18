@@ -1,12 +1,14 @@
 """
 ms_queue_utils.py
 =================
-Tab 4 -- MS Sample Queue Generator.
+Tab 4: MS Sample Queue Generator.
 
 Ported from create_ms_queue_streamlit.py.
 Accepts sample list CSV piped from Tab 3 or via direct upload.
 
-Outputs: queue XLSX + slot plate CSVs + plate map PNGs (zip).
+Instruments: Bruker timsTOF Ultra (HyStar XLSX) and Thermo Astral Zoom
+(Xcalibur CSV) with Evosep One or Vanquish Neo.
+Outputs: queue file + slot plate CSVs + plate map PNGs + run order CSV (zip).
 """
 
 import csv
@@ -60,6 +62,35 @@ QUEUE_COLS = [
     "Sample Type", "Volume [µl]", "Data Path", "Run Automated Processing",
 ]
 
+# ============================================================
+# INSTRUMENTS
+# ============================================================
+INST_ULTRA = "timsTOF Ultra"
+INST_ZOOM  = "Astral Zoom"
+LC_EVOSEP  = "Evosep One"
+LC_NEO     = "Vanquish Neo"
+
+# Xcalibur sequence columns, names must match exactly
+XCAL_COLS = [
+    "Sample Type", "File Name", "Sample ID", "Path", "Instrument Method",
+    "Process Method", "Calibration File", "Position", "Inj Vol", "Level",
+    "Sample Wt", "Sample Vol", "ISTD Amt", "Dil Factor", "L1 Study",
+    "L2 Client", "L3 Laboratory", "L4 Company", "L5 Phone", "Comment", "Sample Name",
+]
+XCAL_HEADER = "Bracket Type=4"
+
+# Dummy presets from methods.csv, replace once the real methods are set
+ZOOM_LC_SHORT = {LC_EVOSEP: ["WhisperZOOM40"], LC_NEO: ["Neo60SPD"]}
+ZOOM_MS_METHODS = {
+    "DIA_FAIMS50CV": r"D:\MS method\ROI opt\22min_adj5_grad_FAIMS_-50CV_DIA_MS1OT_MS2AST_20261102",
+    "DIA":           r"D:\MS method\22min_Thermo_60SPDgrad_DIA_MS1OT_MS2AST_20251125",
+}
+
+EVOSEP_SLOTS  = [f"Slot{i}" for i in range(1, 7)]
+NEO_TRAYS     = ["R", "G", "B", "Y"]
+NEO_FIXED_DEFAULT = {"Blank": "R:F9", "K562": "R:A1", "Supermix": "R:A2"}
+NEO_POS_RE    = re.compile(r"^[RGBY]:[A-H](1[0-2]|[1-9])$")
+
 CTRL_COLORS       = {"K562": "#4C9BE8", "Supermix": "#F4A261", "Blank": "#B7E4C7"}
 CTRL_COLORS_SPARE = {"K562": "#C5DDF7", "Supermix": "#FAE0C8", "Blank": "#E6F7EC"}
 GREY_REPLACEMENTS = {14: "#777777", 15: "#555555"}
@@ -93,8 +124,43 @@ def split_groups(samples, max_size=GROUP_SIZE):
     return groups
 
 
-def make_row(vial, sample_id, data_path, sep_method, inj_method, ms_method, proc_method):
+def normalize_well(well_id):
+    """A01 to A1."""
+    w = well_id.strip().upper()
+    return f"{w[0]}{int(w[1:])}"
+
+
+def sample_vial(well_id, sample_slot, inst):
+    """Ultra and Evosep: SlotN:pos, row wise. Vanquish: tray:well."""
+    if inst == "zoom_neo":
+        return f"{sample_slot}:{normalize_well(well_id)}"
+    return well_to_slot1(well_id.strip()).replace("Slot1", sample_slot)
+
+
+def _xcal_cell(v):
+    s = "" if v is None else str(v)
+    return f'"{s}"' if ("," in s or '"' in s) else s
+
+
+def build_xcalibur_csv(queue_rows, inj_vol):
+    """Xcalibur sequence: header line, 21 columns, trailing comma, CRLF."""
+    lines = [XCAL_HEADER + ",", ",".join(XCAL_COLS) + ","]
+    for r in queue_rows:
+        rec = {
+            "Sample Type": "Unknown", "File Name": r["Sample ID"], "Sample ID": 1,
+            "Path": r["Data Path"], "Instrument Method": r["MS Method"],
+            "Position": r["Vial"], "Inj Vol": inj_vol.get(r.get("_type", "Sample"), 1),
+            "Sample Wt": 0, "Sample Vol": 0, "ISTD Amt": 0, "Dil Factor": 1,
+            "Comment": r.get("_comment", ""),
+        }
+        lines.append(",".join(_xcal_cell(rec.get(c, "")) for c in XCAL_COLS) + ",")
+    return ("\r\n".join(lines) + "\r\n").encode("utf-8")
+
+
+def make_row(vial, sample_id, data_path, sep_method, inj_method, ms_method, proc_method,
+             ctype="Sample"):
     return {
+        "_type": ctype,
         "Vial": vial,
         "Sample ID": sample_id,
         "Method Set": "",
@@ -339,7 +405,7 @@ def count_controls(events, use_k562, use_supermix):
 
 
 # ============================================================
-# CONTROL ALLOCATOR — row-banded, dynamic multi-slot
+# CONTROL ALLOCATOR: row-banded, dynamic multi-slot
 # ============================================================
 class ControlAllocator:
     """
@@ -381,6 +447,16 @@ class ControlAllocator:
         return grids
 
 
+class FixedAllocator:
+    """Vanquish Neo: every control of one type is drawn from the same vial."""
+    def __init__(self, positions: dict):
+        self.positions = positions
+        self.entries   = []
+
+    def add(self, ctype: str, sid: str, in_queue: bool = True) -> str:
+        return self.positions[ctype]
+
+
 # ============================================================
 # QUEUE BUILDER
 # ============================================================
@@ -404,84 +480,84 @@ def _build_plate_queue(rows_for_plate, group_assignments, p,
     sample_path   = p["sample_path"]
     blank_path    = p["blank_path"]
 
-    randomize_order = p.get("randomize_order", False)
+    std_path        = p.get("std_path") or sample_path
+    inst            = p.get("inst", "ultra")
+    tags            = p.get("tags", "")
+    prefix          = f"{date}_{initials}_{lc_short}_{ms_short}" + (f"_{tags}" if tags else "")
+    rand_mode       = p.get("randomize_mode") or ("Within group" if p.get("randomize_order") else "Off")
     rng_seed        = int(p.get("run_seed", 42))
 
     samples = [r for r in rows_for_plate
                if r.get("Dropout {Y/N}", "").strip().upper() != "Y"]
 
-    groups_seen, group_map = [], {}
+    groups_seen, group_map, roi_group = [], {}, {}
     for row in samples:
         roi = row["ROI"].strip()
         grp = group_assignments.get(roi, suggest_group(roi))
+        roi_group[roi] = grp
         if grp not in group_map:
             group_map[grp] = []
             groups_seen.append(grp)
         group_map[grp].append(row)
 
-    if randomize_order:
-        import random as _random
-        rng = _random.Random(rng_seed)
+    orig_blocks = dict(block_assignments or {})
+
+    # Randomization, each sample keeps its own well
+    import random as _random
+    rng = _random.Random(rng_seed)
+    if rand_mode == "Within group":
         for grp in groups_seen:
             rng.shuffle(group_map[grp])
+    elif rand_mode == "Whole plate" and samples:
+        flat = list(samples)
+        rng.shuffle(flat)
+        groups_seen, group_map = ["All samples"], {"All samples": flat}
+        block_assignments = {"All samples": "All samples"}
 
     events      = build_run_events(groups_seen, group_map, p, block_assignments, closing_set)
     ctrl_counts = count_controls(events, use_k562, use_supermix)
-    alloc_pl    = ControlAllocator(ctrl_counts, use_k562, use_supermix,
-                                   start_slot=ctrl_start_slot)
-    queue_pl    = []
+    fixed_ctrl  = inst == "zoom_neo"
+    if fixed_ctrl:
+        alloc_pl = FixedAllocator(p["fixed_positions"])
+    else:
+        alloc_pl = ControlAllocator(ctrl_counts, use_k562, use_supermix, start_slot=ctrl_start_slot)
+    queue_pl = []
 
-    def add_k562():
-        counts["K562"] += 1
-        sid  = f"{date}_{initials}_{lc_short}_{ms_short}_{k562_load}_K562_{counts['K562']}"
-        vial = alloc_pl.add("K562", sid)
-        queue_pl.append(make_row(vial, sid, sample_path, sep_method, inj_method, ms_method, proc_method))
-
-    def add_supermix():
-        counts["Supermix"] += 1
-        sid  = f"{date}_{initials}_{lc_short}_{ms_short}_{supermix_load}_Supermix_{counts['Supermix']}"
-        vial = alloc_pl.add("Supermix", sid)
-        queue_pl.append(make_row(vial, sid, sample_path, sep_method, inj_method, ms_method, proc_method))
-
-    def add_blank():
-        counts["Blank"] += 1
-        sid  = f"{date}_{initials}_{lc_short}_{ms_short}_Blank_{counts['Blank']}"
-        vial = alloc_pl.add("Blank", sid)
-        queue_pl.append(make_row(vial, sid, blank_path, sep_method, inj_method, ms_method, proc_method))
+    def add_ctrl(ctype, load, path):
+        counts[ctype] += 1
+        sid  = f"{prefix}_{load}_{ctype}_{counts[ctype]}" if load else f"{prefix}_{ctype}_{counts[ctype]}"
+        vial = alloc_pl.add(ctype, sid)
+        row  = make_row(vial, sid, path, sep_method, inj_method, ms_method, proc_method, ctype=ctype)
+        queue_pl.append(row)
 
     for kind, row in events:
         if kind == "Sample":
             roi      = row["ROI"].strip()
-            well_pos = well_to_slot1(row["Well_ID"].strip()).replace("Slot1", sample_slot)
-            sid      = f"{date}_{initials}_{lc_short}_{ms_short}_{sample_load}_{roi}"
-            queue_pl.append(make_row(well_pos, sid, sample_path,
-                                     sep_method, inj_method, ms_method, proc_method))
+            well_pos = sample_vial(row["Well_ID"], sample_slot, inst)
+            sid      = f"{prefix}_{sample_load}_{roi}"
+            qrow     = make_row(well_pos, sid, sample_path, sep_method, inj_method, ms_method, proc_method)
+            qrow.update({"_well": normalize_well(row["Well_ID"]), "_group": roi_group.get(roi, ""),
+                         "_block": orig_blocks.get(roi_group.get(roi, ""), "")})
+            queue_pl.append(qrow)
         elif kind == "K562":
-            add_k562()
+            add_ctrl("K562", k562_load, std_path)
         elif kind == "Supermix":
-            add_supermix()
+            add_ctrl("Supermix", supermix_load, std_path)
         else:
-            add_blank()
+            add_ctrl("Blank", "", blank_path)
 
-    # Spares (not in queue, just placed in ctrl plate)
-    k562_sp = ctrl_counts["k562_spares"]
-    smix_sp = ctrl_counts["supermix_spares"]
-    blnk_sp = ctrl_counts["blank_spares"]
-    for i in range(1, k562_sp + 1):
-        n = counts["K562"] + i
-        alloc_pl.add("K562",
-            f"{date}_{initials}_{lc_short}_{ms_short}_{k562_load}_K562_{n}_spare",
-            in_queue=False)
-    for i in range(1, smix_sp + 1):
-        n = counts["Supermix"] + i
-        alloc_pl.add("Supermix",
-            f"{date}_{initials}_{lc_short}_{ms_short}_{supermix_load}_Supermix_{n}_spare",
-            in_queue=False)
-    for i in range(1, blnk_sp + 1):
-        n = counts["Blank"] + i
-        alloc_pl.add("Blank",
-            f"{date}_{initials}_{lc_short}_{ms_short}_Blank_{n}_spare",
-            in_queue=False)
+    # Spares (not in queue, just placed in ctrl plate), none for fixed vials
+    if fixed_ctrl:
+        k562_sp = smix_sp = blnk_sp = 0
+    else:
+        k562_sp = ctrl_counts["k562_spares"]
+        smix_sp = ctrl_counts["supermix_spares"]
+        blnk_sp = ctrl_counts["blank_spares"]
+    for ctype, load, n_sp in (("K562", k562_load, k562_sp), ("Supermix", supermix_load, smix_sp), ("Blank", "", blnk_sp)):
+        for i in range(1, n_sp + 1):
+            n   = counts[ctype] + i
+            sid = f"{prefix}_{load}_{ctype}_{n}_spare" if load else f"{prefix}_{ctype}_{n}_spare"
+            alloc_pl.add(ctype, sid, in_queue=False)
 
     alloc.entries.extend(alloc_pl.entries)
 
@@ -565,19 +641,39 @@ def build_queue_core(csv_bytes: bytes, group_assignments: dict, p: dict,
         all_queue.extend(pr["queue_rows"])
         all_groups_seen.extend(pr["groups_seen"])
 
-    # Queue XLSX
-    try:
-        import openpyxl
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.append(QUEUE_COLS)
-        for row in all_queue:
-            ws.append([row.get(col, "") for col in QUEUE_COLS])
-        xlsx_buf = io.BytesIO()
-        wb.save(xlsx_buf)
-        queue_xlsx = xlsx_buf.getvalue()
-    except ImportError:
-        queue_xlsx = None
+    # Run tracking, written to the Xcalibur Comment column and run_order.csv
+    inst      = p.get("inst", "ultra")
+    rand_mode = p.get("randomize_mode") or ("Within group" if p.get("randomize_order") else "Off")
+    seed_tag  = f"_seed{int(p.get('run_seed', 42))}" if rand_mode != "Off" else ""
+    run_order = []
+    for n, r in enumerate(all_queue, start=1):
+        well = r.get("_well", "")
+        r["_comment"] = f"run{n}_well{well}{seed_tag}" if well else f"run{n}"
+        run_order.append({"Run": n, "Sample ID": r["Sample ID"], "Type": r.get("_type", ""),
+                          "Position": r["Vial"], "Well": well, "Group": r.get("_group", ""),
+                          "Block": r.get("_block", ""), "Randomization": rand_mode,
+                          "Seed": int(p.get("run_seed", 42)) if rand_mode != "Off" else ""})
+    ro_buf = io.StringIO()
+    pd.DataFrame(run_order).to_csv(ro_buf, index=False)
+    run_order_csv = ro_buf.getvalue().encode("utf-8")
+
+    # Queue file, HyStar XLSX for the Ultra, Xcalibur CSV for the Zoom
+    queue_xlsx = queue_csv = None
+    if inst == "ultra":
+        try:
+            import openpyxl
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.append(QUEUE_COLS)
+            for row in all_queue:
+                ws.append([row.get(col, "") for col in QUEUE_COLS])
+            xlsx_buf = io.BytesIO()
+            wb.save(xlsx_buf)
+            queue_xlsx = xlsx_buf.getvalue()
+        except ImportError:
+            queue_xlsx = None
+    else:
+        queue_csv = build_xcalibur_csv(all_queue, p.get("inj_vol", {}))
 
     # Per-plate sample slot grids + PNGs
     sample_slot_outputs = {}   # {sample_slot_label: {grid, png, csv}}
@@ -664,8 +760,14 @@ def build_queue_core(csv_bytes: bytes, group_assignments: dict, p: dict,
     total_smix_sp = sum(pr["supermix_spares"] for pr in plate_results.values())
     total_blnk_sp = sum(pr["blank_spares"]    for pr in plate_results.values())
 
+    max_ctrl_slot = max((slot for slot, *_ in combined_alloc.entries), default=0)
+
     return {
         "queue_xlsx":         queue_xlsx,
+        "queue_csv":          queue_csv,
+        "run_order_csv":      run_order_csv,
+        "inst":               inst,
+        "max_ctrl_slot":      max_ctrl_slot,
         "sample_slot_outputs": sample_slot_outputs,
         "ctrl_slots":         ctrl_slot_outputs,
         "queue_rows":         all_queue,
@@ -689,6 +791,10 @@ def build_zip(res: dict) -> bytes:
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         if res["queue_xlsx"]:
             z.writestr(f"{stem}_queue.xlsx", res["queue_xlsx"])
+        if res.get("queue_csv"):
+            z.writestr(f"{stem}_queue_xcalibur.csv", res["queue_csv"])
+        if res.get("run_order_csv"):
+            z.writestr(f"{stem}_run_order.csv", res["run_order_csv"])
         for key, data in res["sample_slot_outputs"].items():
             z.writestr(f"{stem}_{key}_samples.csv", data["csv"])
             z.writestr(f"{stem}_{key}_samples.png", data["png"])
@@ -703,7 +809,6 @@ def build_zip(res: dict) -> bytes:
 # ============================================================
 def render_ms_queue_tab():
     st.header("MS Sample Queue")
-    st.caption("Generates Bruker timsTOF queue (XLSX + plate maps) from sample list CSV.")
 
     for key in ("msq_results", "msq_zip", "msq_last", "msq_group_assignments",
                 "msq_block_labels", "msq_csv_hash", "msq_overrides", "msq_last_key"):
@@ -712,52 +817,101 @@ def render_ms_queue_tab():
 
     date = datetime.date.today().strftime("%Y%m%d")
 
-    # Parameters
-    c1, c2, c3 = st.columns([1, 2, 2])
+    # 1. Instrument
+    st.subheader("1. Instrument")
+    i1, i2 = st.columns(2)
+    instrument = i1.radio("Instrument", [INST_ULTRA, INST_ZOOM], horizontal=True, key="msq_instrument")
+    lc_system  = i2.radio("LC system", [LC_EVOSEP, LC_NEO], horizontal=True, key="msq_lc_system") \
+                 if instrument == INST_ZOOM else LC_EVOSEP
+    inst = "ultra" if instrument == INST_ULTRA else ("zoom_neo" if lc_system == LC_NEO else "zoom_evo")
+    is_zoom = inst != "ultra"
+    st.caption({
+        "ultra":    "Bruker HyStar queue (XLSX). Positions SlotN:1 to 96, controls one well per injection.",
+        "zoom_evo": "Xcalibur sequence (CSV). Evosep Slot1 to Slot6, positions SlotN:1 to 96 (A1=1, B1=13), "
+                    "controls one tip per injection.",
+        "zoom_neo": "Xcalibur sequence (CSV). Vanquish trays R, G, B, Y, positions A1 to H12, "
+                    "controls drawn from fixed vials.",
+    }[inst])
+
+    # 2. Naming and loads
+    st.divider()
+    st.subheader("2. Naming and loads")
+    if is_zoom:
+        lc_opts = ZOOM_LC_SHORT[lc_system] + ["Custom"]
+        ms_opts = list(ZOOM_MS_METHODS.keys()) + ["Custom"]
+    else:
+        lc_opts, ms_opts = LC_OPTIONS, MS_OPTIONS
+
+    c1, c2, c3, c4 = st.columns([1, 2, 2, 2])
     initials = c1.text_input("Initials", value="FK", key="msq_initials")
 
-    lc_sel   = c2.selectbox("LC method", LC_OPTIONS, key="msq_lc_sel")
-    lc_short = c2.text_input("Custom LC short name", value="", key="msq_lc_custom") \
+    lc_sel   = c2.selectbox("LC short name", lc_opts, key=f"msq_lc_sel_{inst}")
+    lc_short = c2.text_input("Custom LC short name", value="", key=f"msq_lc_custom_{inst}") \
                if lc_sel == "Custom" else lc_sel
 
-    ms_sel   = c3.selectbox("MS method", MS_OPTIONS, key="msq_ms_sel")
-    ms_short = c3.text_input("Custom MS short name", value="", key="msq_ms_custom") \
+    ms_sel   = c3.selectbox("MS method", ms_opts, key=f"msq_ms_sel_{inst}")
+    ms_short = c3.text_input("Custom MS short name", value="", key=f"msq_ms_custom_{inst}") \
                if ms_sel == "Custom" else ms_sel
 
-    c4, c5, c6, c7, c8 = st.columns(5)
-    sample_load   = c4.text_input("Sample load",   value="20ul", key="msq_sload")
-    use_k562      = c5.checkbox("K562",             value=True,   key="msq_k562")
-    k562_load     = c6.text_input("K562 load",      value="1ng",  key="msq_k562l") if use_k562     else ""
-    use_supermix  = c7.checkbox("Supermix",         value=True,   key="msq_smix")
-    supermix_load = c8.text_input("Supermix load",  value="20ng", key="msq_smixl") if use_supermix else ""
+    tags = c4.text_input("Tags (optional)", value="", key="msq_tags",
+                         help="Inserted after the MS short name, e.g. FAIMS50CV or peptide.")
+    tags = re.sub(r"\s+", "_", tags.strip())
 
-    # Slot assignment — configured per plate after CSV is loaded (see below)
-    SLOT_OPTIONS = [f"Slot{i}" for i in range(1, 13)]
+    c5, c6, c7, c8, c9 = st.columns(5)
+    sample_load   = c5.text_input("Sample load",   value="20ul", key="msq_sload")
+    use_k562      = c6.checkbox("K562",             value=True,   key="msq_k562")
+    k562_load     = c7.text_input("K562 load",      value="1ng",  key="msq_k562l") if use_k562     else ""
+    use_supermix  = c8.checkbox("Supermix",         value=True,   key="msq_smix")
+    supermix_load = c9.text_input("Supermix load",  value="20ng", key="msq_smixl") if use_supermix else ""
 
+    _pref = f"{date}_{initials}_{lc_short}_{ms_short}" + (f"_{tags}" if tags else "")
+    st.caption(f"Sample ID pattern: `{_pref}_{sample_load}_<ROI>`")
+
+    inj_vol = {}
+    if is_zoom:
+        v1, v2, v3, v4, _v5 = st.columns(5)
+        inj_vol["Sample"]   = v1.number_input("Inj Vol sample (µl)",   min_value=0.0, value=1.0, step=0.1, key="msq_iv_s")
+        inj_vol["K562"]     = v2.number_input("Inj Vol K562 (µl)",     min_value=0.0, value=1.0, step=0.1, key="msq_iv_k")
+        inj_vol["Supermix"] = v3.number_input("Inj Vol Supermix (µl)", min_value=0.0, value=1.0, step=0.1, key="msq_iv_m")
+        inj_vol["Blank"]    = v4.number_input("Inj Vol blank (µl)",    min_value=0.0, value=1.0, step=0.1, key="msq_iv_b")
+
+    # 3. Methods and data paths
+    st.divider()
+    st.subheader("3. Methods and data paths")
     with st.expander("Instrument method paths", expanded=False):
-        default_sep              = LC_METHODS.get(lc_short, "")
-        default_ms, default_proc = MS_METHODS.get(ms_short, ("", ""))
-        sep_method  = st.text_area("Separation Method", value=default_sep,   height=60, key="msq_sep")
-        inj_method  = st.text_input("Injection Method",  value="Standard",               key="msq_inj")
-        ms_method   = st.text_area("MS Method",          value=default_ms,   height=60, key="msq_ms")
-        proc_method = st.text_area("Processing Method",  value=default_proc, height=60, key="msq_proc")
+        if is_zoom:
+            sep_method = inj_method = proc_method = ""
+            ms_method  = st.text_area("Instrument Method", value=ZOOM_MS_METHODS.get(ms_short, ""),
+                                      height=60, key=f"msq_ms_{inst}_{ms_short}")
+            st.caption("Dummy presets from methods.csv until the real methods are set.")
+        else:
+            default_sep              = LC_METHODS.get(lc_short, "")
+            default_ms, default_proc = MS_METHODS.get(ms_short, ("", ""))
+            sep_method  = st.text_area("Separation Method", value=default_sep,   height=60, key="msq_sep")
+            inj_method  = st.text_input("Injection Method",  value="Standard",               key="msq_inj")
+            ms_method   = st.text_area("MS Method",          value=default_ms,   height=60, key="msq_ms")
+            proc_method = st.text_area("Processing Method",  value=default_proc, height=60, key="msq_proc")
 
     _year      = date[:4]
     _month_str = datetime.datetime.strptime(date, "%Y%m%d").strftime("%m %B")
+    _root      = rf"D:\Data\{_year}\{_month_str}"
     with st.expander("Data paths", expanded=True):
-        cp1, cp2    = st.columns(2)
-        sample_path = cp1.text_input("Sample / K562 / Supermix path",
-                                     value=rf"D:\Data\{_year}\{_month_str}\Sample\{initials}",
-                                     key="msq_spath")
-        blank_path  = cp2.text_input("Blank path",
-                                     value=rf"D:\Data\{_year}\{_month_str}\Blank",
-                                     key="msq_bpath")
+        if is_zoom:
+            cp1, cp2, cp3 = st.columns(3)
+            sample_path = cp1.text_input("Sample path",   value=rf"{_root}\Sample\{initials}", key="msq_spath_zoom")
+            std_path    = cp2.text_input("Standard path", value=rf"{_root}\Standard",          key="msq_stdpath_zoom")
+            blank_path  = cp3.text_input("Blank path",    value=rf"{_root}\Blank",             key="msq_bpath_zoom")
+        else:
+            cp1, cp2    = st.columns(2)
+            sample_path = cp1.text_input("Sample / K562 / Supermix path",
+                                         value=rf"{_root}\Sample\{initials}", key="msq_spath")
+            blank_path  = cp2.text_input("Blank path", value=rf"{_root}\Blank", key="msq_bpath")
+            std_path    = sample_path
 
+    # 4. Sample list
     st.divider()
-
-    # Source
+    st.subheader("4. Sample list")
     pipe_csv  = st.session_state.get("t3_sample_list")
-    SLOT_OPTIONS = [f"Slot{i}" for i in range(1, 13)]
     pipe_stem = st.session_state.get("t3_stem")
     uploaded  = st.file_uploader("Upload sample list CSV", type=["csv"], key="msq_upload")
 
@@ -801,46 +955,105 @@ def render_ms_queue_tab():
     plate_order   = sorted({r.get("Plate", "Plate1").strip()
                              for r in all_rows}) if has_plate_col else ["Plate1"]
 
-    # Per-plate slot assignment
+    # 5. Randomization
     st.divider()
-    st.subheader("Plate Slot Assignment")
-    st.caption("Auto-assigned consecutively (Plate1: Slot1+Slot2, Plate2: Slot3+Slot4, ...). Edit to override.")
+    st.subheader("5. Randomization")
+    st.caption("Samples are shuffled first, blanks and standards are then inserted by the rules below. "
+               "Each sample keeps its own well. Run number, well and seed go to run_order.csv"
+               + (" and the Xcalibur Comment column." if is_zoom else "."))
+    _ra1, _ra2 = st.columns([2, 1])
+    randomize_mode = _ra1.radio("Randomize run order", ["Off", "Within group", "Whole plate"],
+                                horizontal=True, key="msq_rand_mode",
+                                help="Whole plate ignores groups and blocks: one block per plate.")
+    run_seed = _ra2.number_input("Random seed", min_value=0, max_value=9999, value=42, step=1,
+                                 key="msq_run_seed", disabled=randomize_mode == "Off")
 
-    saved_slot_map = st.session_state.get("msq_plate_slot_map") or {}
-    slot_data = []
-    for i, pl in enumerate(plate_order):
-        saved = saved_slot_map.get(pl, {})
-        slot_data.append({
-            "Plate":              pl,
-            "Sample slot":        saved.get("sample_slot",    f"Slot{i * 2 + 1}"),
-            "Controls start slot": saved.get("ctrl_start_slot_str", f"Slot{i * 2 + 2}"),
-        })
-
-    slot_df = pd.DataFrame(slot_data)
-    edited_slots = st.data_editor(
-        slot_df,
-        column_config={
-            "Plate":              st.column_config.TextColumn("Plate", disabled=True),
-            "Sample slot":        st.column_config.SelectboxColumn("Sample slot",    options=SLOT_OPTIONS),
-            "Controls start slot": st.column_config.SelectboxColumn("Controls start slot", options=SLOT_OPTIONS),
-        },
-        hide_index=True,
-        use_container_width=True,
-        key="msq_slot_editor",
-    )
-
-    # Build plate_slot_map from editor
-    plate_slot_map = {}
-    for _, row in edited_slots.iterrows():
-        pl = row["Plate"]
-        plate_slot_map[pl] = {
-            "sample_slot":     row["Sample slot"],
-            "ctrl_start_slot": int(row["Controls start slot"].replace("Slot", "")),
-            "ctrl_start_slot_str": row["Controls start slot"],
-        }
-    st.session_state.msq_plate_slot_map = plate_slot_map
-
+    # 6. Plates and control positions
     st.divider()
+    st.subheader("6. Plates and control positions")
+    fixed_positions = {}
+    saved_slot_map  = st.session_state.get(f"msq_plate_slot_map_{inst}") or {}
+
+    if inst == "zoom_neo":
+        st.caption("One tray per sample plate. Controls are drawn from fixed vials, edit if needed.")
+        free_trays = [t for t in NEO_TRAYS if t != "R"] + ["R"]
+        slot_df = pd.DataFrame([
+            {"Plate": pl, "Tray": saved_slot_map.get(pl, {}).get("sample_slot", free_trays[i % 4])}
+            for i, pl in enumerate(plate_order)
+        ])
+        edited_slots = st.data_editor(
+            slot_df,
+            column_config={
+                "Plate": st.column_config.TextColumn("Plate", disabled=True),
+                "Tray":  st.column_config.SelectboxColumn("Tray", options=NEO_TRAYS),
+            },
+            hide_index=True, use_container_width=True, key=f"msq_slot_editor_{inst}",
+        )
+        plate_slot_map = {row["Plate"]: {"sample_slot": row["Tray"], "ctrl_start_slot": 0}
+                          for _, row in edited_slots.iterrows()}
+
+        f1, f2, f3 = st.columns(3)
+        fixed_positions["Blank"]    = f1.text_input("Blank vial",    value=NEO_FIXED_DEFAULT["Blank"],    key="msq_fix_b").strip().upper()
+        fixed_positions["K562"]     = f2.text_input("K562 vial",     value=NEO_FIXED_DEFAULT["K562"],     key="msq_fix_k",
+                                                    disabled=not use_k562).strip().upper()
+        fixed_positions["Supermix"] = f3.text_input("Supermix vial", value=NEO_FIXED_DEFAULT["Supermix"], key="msq_fix_m",
+                                                    disabled=not use_supermix).strip().upper()
+        bad = [f"{k} `{v}`" for k, v in fixed_positions.items() if not NEO_POS_RE.match(v)]
+        if bad:
+            st.error("Invalid vial position: " + ", ".join(bad) + ". Use tray:well, e.g. R:F9.")
+            return
+        if len(plate_order) > len(NEO_TRAYS):
+            st.error(f"{len(plate_order)} plates but only {len(NEO_TRAYS)} trays.")
+            return
+
+        # Sample wells that collide with a fixed control vial
+        tray_of = {pl: v["sample_slot"] for pl, v in plate_slot_map.items()}
+        fixed_set = {v: k for k, v in fixed_positions.items()
+                     if k == "Blank" or (k == "K562" and use_k562) or (k == "Supermix" and use_supermix)}
+        clashes = []
+        for r in samples:
+            if not r.get("Well_ID", "").strip():
+                continue
+            pl  = r.get("Plate", "Plate1").strip() if has_plate_col else "Plate1"
+            pos = f"{tray_of.get(pl, '')}:{normalize_well(r['Well_ID'])}"
+            if pos in fixed_set:
+                clashes.append(f"{r['ROI'].strip()} at {pos} ({fixed_set[pos]})")
+        if clashes:
+            st.error("Sample wells collide with control vials: " + "; ".join(clashes))
+            return
+        dup_trays = {t for t in tray_of.values() if list(tray_of.values()).count(t) > 1}
+        if dup_trays:
+            st.error("Two plates on the same tray: " + ", ".join(sorted(dup_trays)))
+            return
+    else:
+        slot_opts = EVOSEP_SLOTS if inst == "zoom_evo" else [f"Slot{i}" for i in range(1, 13)]
+        st.caption("Auto-assigned consecutively (Plate1: Slot1+Slot2, Plate2: Slot3+Slot4, ...). Edit to override.")
+        slot_data = []
+        for i, pl in enumerate(plate_order):
+            saved = saved_slot_map.get(pl, {})
+            slot_data.append({
+                "Plate":               pl,
+                "Sample slot":         saved.get("sample_slot",         f"Slot{i * 2 + 1}"),
+                "Controls start slot": saved.get("ctrl_start_slot_str", f"Slot{i * 2 + 2}"),
+            })
+        edited_slots = st.data_editor(
+            pd.DataFrame(slot_data),
+            column_config={
+                "Plate":               st.column_config.TextColumn("Plate", disabled=True),
+                "Sample slot":         st.column_config.SelectboxColumn("Sample slot",         options=slot_opts),
+                "Controls start slot": st.column_config.SelectboxColumn("Controls start slot", options=slot_opts),
+            },
+            hide_index=True, use_container_width=True, key=f"msq_slot_editor_{inst}",
+        )
+        plate_slot_map = {}
+        for _, row in edited_slots.iterrows():
+            plate_slot_map[row["Plate"]] = {
+                "sample_slot":         row["Sample slot"],
+                "ctrl_start_slot":     int(row["Controls start slot"].replace("Slot", "")),
+                "ctrl_start_slot_str": row["Controls start slot"],
+            }
+    st.session_state[f"msq_plate_slot_map_{inst}"] = plate_slot_map
+
 
     # Read Group column from CSV if present (piped from Tab 2/3)
     has_group_col = "Group" in (reader.fieldnames or [])
@@ -875,7 +1088,8 @@ def render_ms_queue_tab():
     group_df = pd.DataFrame(init_data)
 
     # Block editor, one row per block key
-    st.subheader("Block Assignment")
+    st.divider()
+    st.subheader("7. Block assignment")
     st.caption(
         "K562 + Supermix + Blank at each block start, counters reset there. "
         "Inside a block the samples of all its groups are batched together, a Blank runs "
@@ -946,26 +1160,20 @@ def render_ms_queue_tab():
         f"**{b}** ({len(gs)} groups)" for b, gs in block_summary.items()
     ))
 
+    # 8. Control intervals
     st.divider()
-    st.subheader("Run Order")
+    st.subheader("8. Control intervals")
     _ro1, _ro2, _ro3 = st.columns([1, 1, 1])
-    randomize_order = _ro1.checkbox("Randomize sample order within groups", value=False,
-                                    key="msq_randomize")
-    block_size = _ro2.number_input("Blank interval (samples)", min_value=1,
+    block_size = _ro1.number_input("Blank interval (samples)", min_value=1,
                                    max_value=50, value=GROUP_SIZE, step=1,
                                    key="msq_block_size",
                                    help="Max samples between Blank injections.")
-    run_seed = _ro3.number_input("Random seed", min_value=0, max_value=9999,
-                                 value=42, step=1, key="msq_run_seed",
-                                 disabled=not randomize_order)
-
-    _ro4, _ro5, _ro6 = st.columns([1, 1, 1])
-    smix_interval = _ro4.number_input("Supermix interval (samples)", min_value=1,
+    smix_interval = _ro2.number_input("Supermix interval (samples)", min_value=1,
                                       max_value=96, value=SUPERMIX_INTERVAL, step=1,
                                       key="msq_smix_interval", disabled=not use_supermix,
                                       help="Max samples between Supermix injections.")
-    run_len_min = _ro5.number_input("Run length (min)", min_value=1, max_value=240,
-                                    value=40, step=1, key="msq_run_len",
+    run_len_min = _ro3.number_input("Run length (min)", min_value=1, max_value=240,
+                                    value=22 if is_zoom else 40, step=1, key=f"msq_run_len_{'zoom' if is_zoom else 'ultra'}",
                                     help="Per injection, used for the runtime estimate.")
 
     if use_supermix and int(smix_interval) < int(block_size):
@@ -976,15 +1184,15 @@ def render_ms_queue_tab():
     overrides         = st.session_state.msq_overrides or []
 
     params = dict(
-        date=date, initials=initials, lc_short=lc_short, ms_short=ms_short,
+        date=date, initials=initials, lc_short=lc_short, ms_short=ms_short, tags=tags,
         sample_load=sample_load, k562_load=k562_load, supermix_load=supermix_load,
         use_k562=use_k562, use_supermix=use_supermix,
         sep_method=sep_method, inj_method=inj_method,
         ms_method=ms_method, proc_method=proc_method,
-        sample_path=sample_path, blank_path=blank_path,
-        stem=stem,
+        sample_path=sample_path, blank_path=blank_path, std_path=std_path,
+        stem=stem, inst=inst, inj_vol=inj_vol, fixed_positions=fixed_positions,
         plate_slot_map=plate_slot_map,
-        randomize_order=randomize_order,
+        randomize_mode=randomize_mode,
         block_size=block_size,
         smix_interval=smix_interval,
         run_seed=run_seed,
@@ -993,19 +1201,22 @@ def render_ms_queue_tab():
 
     # Rebuild only when something that changes the queue changed
     build_key = (
-        csv_hash,
+        csv_hash, inst, tags, std_path,
+        tuple(sorted(inj_vol.items())), tuple(sorted(fixed_positions.items())),
         tuple(sorted(group_assignments.items())),
         tuple(sorted(block_assignments.items())),
         tuple(sorted((pl, v["sample_slot"], v["ctrl_start_slot"])
                      for pl, v in plate_slot_map.items())),
-        bool(randomize_order), int(block_size), int(smix_interval), int(run_seed),
+        randomize_mode, int(block_size), int(smix_interval), int(run_seed),
         bool(use_k562), bool(use_supermix),
         sample_load, k562_load, supermix_load, initials, lc_short, ms_short,
         sep_method, inj_method, ms_method, proc_method, sample_path, blank_path, stem,
         tuple(sorted((o["action"], o["type"], o["after"]) for o in overrides)),
     )
 
+    # 9. Run sequence and adjustments
     st.divider()
+    st.subheader("9. Run sequence and adjustments")
     if st.session_state.msq_last_key != build_key or not st.session_state.msq_results:
         with st.spinner("Building queue..."):
             res = build_queue_core(csv_bytes, group_assignments, params,
@@ -1025,8 +1236,12 @@ def render_ms_queue_tab():
         f"K562: {c['K562']} (+{res['k562_spares']} spare) | "
         f"Supermix: {c['Supermix']} (+{res['supermix_spares']} spare) | "
         f"Blank: {c['Blank']} (+{res['blank_spares']} spare) | "
-        f"Control slots used: {n_cslots}"
+        + ("Fixed vials: " + ", ".join(f"{k} {v}" for k, v in fixed_positions.items())
+           if inst == "zoom_neo" else f"Control slots used: {n_cslots}")
     )
+    if inst == "zoom_evo" and res.get("max_ctrl_slot", 0) > len(EVOSEP_SLOTS):
+        st.error(f"Controls spill into Slot{res['max_ctrl_slot']}, the Evosep has "
+                 f"{len(EVOSEP_SLOTS)} slots.")
     _total_min = res["n_queue"] * int(run_len_min)
     st.caption(f"Estimated runtime: {res['n_queue']} injections x {int(run_len_min)} min = "
                f"{_total_min / 60:.1f} h ({_total_min / 1440:.1f} days)")
@@ -1044,15 +1259,16 @@ def render_ms_queue_tab():
 
     with st.expander("Run sequence", expanded=True):
         seq_rows = [
-            {"#": n + 1, "Vial": r.get("Vial", ""), "Sample ID": r.get("Sample ID", "")}
+            {"#": n + 1, ("Position" if is_zoom else "Vial"): r.get("Vial", ""),
+             ("File Name" if is_zoom else "Sample ID"): r.get("Sample ID", ""),
+             "Comment": r.get("_comment", "")}
             for n, r in enumerate(res.get("queue_rows", []))
         ]
         st.dataframe(pd.DataFrame(seq_rows), hide_index=True,
                      use_container_width=True, height=360)
 
-    # ---------- Adjust ----------
-    st.divider()
-    st.subheader("Adjust")
+    # Adjust
+    st.markdown("**Adjust groups and controls**")
     st.caption(
         "Groups are auto-suggested by stripping trailing numbers from sample names. "
         "Edit the grouping or force a control injection, the queue rebuilds on change."
@@ -1120,9 +1336,9 @@ def render_ms_queue_tab():
         st.session_state.msq_overrides = new_ov
         st.rerun()
 
+    # 10. Plate maps
     st.divider()
-
-    # Plate maps — sample slots + ctrl slots, 2 per row
+    st.subheader("10. Plate maps")
     all_plate_items = []
     for key, data in res["sample_slot_outputs"].items():
         all_plate_items.append((f"{data['sample_slot']} - {data['plate']} Samples", data["png"]))
@@ -1133,10 +1349,12 @@ def render_ms_queue_tab():
         cols  = st.columns(len(chunk))
         for col, (title, png) in zip(cols, chunk):
             with col:
-                st.subheader(title)
+                st.markdown(f"**{title}**")
                 st.image(png, use_container_width=True)
 
-    st.subheader("Downloads")
+    # 11. Downloads
+    st.divider()
+    st.subheader("11. Downloads")
     stem_out = res["stem"]
 
     def build_all_zip(res, msq_zip_bytes):
@@ -1171,10 +1389,14 @@ def render_ms_queue_tab():
         file_name=f"{stem_out}_ms_queue.zip", mime="application/zip"
     )
 
-    st.markdown("---")
+    st.divider()
 
     # Individual file downloads
     dl_items = []
+    if res.get("queue_csv"):
+        dl_items.append(("Queue CSV (Xcalibur)", res["queue_csv"], f"{stem_out}_queue_xcalibur.csv", "text/csv"))
+    if res.get("run_order_csv"):
+        dl_items.append(("Run order CSV", res["run_order_csv"], f"{stem_out}_run_order.csv", "text/csv"))
     if res["queue_xlsx"]:
         dl_items.append(("Queue XLSX", res["queue_xlsx"],
                          f"{stem_out}_queue.xlsx",
