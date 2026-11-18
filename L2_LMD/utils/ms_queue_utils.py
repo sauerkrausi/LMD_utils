@@ -80,11 +80,18 @@ XCAL_COLS = [
 XCAL_HEADER = "Bracket Type=4"
 
 # Dummy presets from methods.csv, replace once the real methods are set
-ZOOM_LC_SHORT = {LC_EVOSEP: ["WhisperZOOM40"], LC_NEO: ["Neo60SPD"]}
+ZOOM_MS_SHORT     = "Zoom"
+ZOOM_LC_NAME      = {LC_EVOSEP: "Evosep", LC_NEO: "VanquishNeo"}
+ZOOM_GRADIENT     = {LC_EVOSEP: "40SPD",  LC_NEO: "60SPD"}
 ZOOM_MS_METHODS = {
-    "DIA_FAIMS50CV": r"D:\MS method\ROI opt\22min_adj5_grad_FAIMS_-50CV_DIA_MS1OT_MS2AST_20261102",
-    "DIA":           r"D:\MS method\22min_Thermo_60SPDgrad_DIA_MS1OT_MS2AST_20251125",
+    "defaultDIA": {
+        "noFAIMS": r"D:\MS method\22min_Thermo_60SPDgrad_DIA_MS1OT_MS2AST_20251125",
+        "FAIMS":   r"D:\MS method\ROI opt\22min_adj5_grad_FAIMS_-50CV_DIA_MS1OT_MS2AST_20261102",
+    },
 }
+
+# Accepted spellings of the sample name column, first match wins
+SAMPLE_COLS = ["ROI", "Sample", "sample_name", "Sample Name", "Sample_Name", "sample"]
 
 EVOSEP_SLOTS  = [f"Slot{i}" for i in range(1, 7)]
 NEO_TRAYS     = ["R", "G", "B", "Y"]
@@ -130,6 +137,76 @@ def normalize_well(well_id):
     return f"{w[0]}{int(w[1:])}"
 
 
+def faims_token(on, cv):
+    """FAIMS plus optional CV(s), - written as neg, e.g. -40,-60 to FAIMSneg40neg60."""
+    if not on:
+        return ""
+    parts = [c.strip() for c in re.split(r"[,;\s/]+", cv or "") if c.strip()]
+    cvs   = "".join(re.sub(r"[^A-Za-z0-9]", "", c.replace("-", "neg").replace("+", "pos")) for c in parts)
+    return "FAIMS" + cvs
+
+
+def name_prefix(p):
+    """Ultra: date_initials_LC_MS. Zoom: date_initials_MS_LC_FAIMS_Acq_Gradient. Tags last, empties skipped."""
+    if p.get("inst", "ultra") == "ultra":
+        parts = [p["date"], p["initials"], p["lc_short"], p["ms_short"]]
+    else:
+        z = p.get("zoom_name", {})
+        parts = [p["date"], p["initials"], z.get("ms", ""), z.get("lc", ""),
+                 faims_token(z.get("faims"), z.get("cv")), z.get("acq", ""), z.get("gradient", "")]
+        parts = [x for x in parts if str(x).strip()]
+    if p.get("tags"):
+        parts.append(p["tags"])
+    return "_".join(str(x).strip() for x in parts)
+
+
+def read_sample_rows(csv_bytes):
+    """Parse the sample list, map the sample name column to ROI. Returns rows, fieldnames, source column."""
+    text   = csv_bytes.decode("utf-8-sig")
+    reader = csv.DictReader(io.StringIO(text))
+    fields = [h.strip() for h in (reader.fieldnames or [])]
+    reader.fieldnames = fields
+    rows   = list(reader)
+    src    = next((c for c in SAMPLE_COLS if c in fields), None)
+    if src and src != "ROI":
+        for r in rows:
+            r["ROI"] = r.get(src, "")
+        fields = fields + ["ROI"]
+    return rows, fields, src
+
+
+def apply_sample_table(rows, table):
+    """Per-sample Load and Inj Vol from the editor. A sample listed again becomes a repeat
+    injection from the same well, attached to its original so it runs right after it."""
+    if not table:
+        return rows
+    by_name = {}
+    for r in rows:
+        by_name.setdefault(r["ROI"].strip(), r)
+        r["_repeats"] = []
+    seen = set()
+    for t in table:
+        name = str(t.get("Sample") or "").strip()
+        orig = by_name.get(name)
+        if orig is None:
+            continue
+        load = str(t.get("Load") or "").strip()
+        vol  = t.get("Inj Vol")
+        vol  = None if vol is None or (isinstance(vol, float) and math.isnan(vol)) else float(vol)
+        if name not in seen:
+            seen.add(name)
+            orig["_load"], orig["_inj_vol"] = load, vol
+        else:
+            rr = dict(orig, _load=load, _inj_vol=vol, _repeats=[])
+            rr["_rep"] = len(orig["_repeats"]) + 2
+            orig["_repeats"].append(rr)
+    return rows
+
+
+def _num(v):
+    return int(v) if float(v).is_integer() else v
+
+
 def sample_vial(well_id, sample_slot, inst):
     """Ultra and Evosep: SlotN:pos, row wise. Vanquish: tray:well."""
     if inst == "zoom_neo":
@@ -149,7 +226,8 @@ def build_xcalibur_csv(queue_rows, inj_vol):
         rec = {
             "Sample Type": "Unknown", "File Name": r["Sample ID"], "Sample ID": 1,
             "Path": r["Data Path"], "Instrument Method": r["MS Method"],
-            "Position": r["Vial"], "Inj Vol": inj_vol.get(r.get("_type", "Sample"), 1),
+            "Position": r["Vial"],
+            "Inj Vol": _num(r["_inj_vol"]) if r.get("_inj_vol") is not None else inj_vol.get(r.get("_type", "Sample"), 1),
             "Sample Wt": 0, "Sample Vol": 0, "ISTD Amt": 0, "Dil Factor": 1,
             "Comment": r.get("_comment", ""),
         }
@@ -482,8 +560,7 @@ def _build_plate_queue(rows_for_plate, group_assignments, p,
 
     std_path        = p.get("std_path") or sample_path
     inst            = p.get("inst", "ultra")
-    tags            = p.get("tags", "")
-    prefix          = f"{date}_{initials}_{lc_short}_{ms_short}" + (f"_{tags}" if tags else "")
+    prefix          = name_prefix(p)
     rand_mode       = p.get("randomize_mode") or ("Within group" if p.get("randomize_order") else "Off")
     rng_seed        = int(p.get("run_seed", 42))
 
@@ -514,7 +591,14 @@ def _build_plate_queue(rows_for_plate, group_assignments, p,
         groups_seen, group_map = ["All samples"], {"All samples": flat}
         block_assignments = {"All samples": "All samples"}
 
-    events      = build_run_events(groups_seen, group_map, p, block_assignments, closing_set)
+    events = build_run_events(groups_seen, group_map, p, block_assignments, closing_set)
+    # Repeats run directly after their original, controls placed after the original follow the repeats
+    expanded = []
+    for kind, row in events:
+        expanded.append((kind, row))
+        if kind == "Sample":
+            expanded.extend(("Sample", rr) for rr in row.get("_repeats", []))
+    events = expanded
     ctrl_counts = count_controls(events, use_k562, use_supermix)
     fixed_ctrl  = inst == "zoom_neo"
     if fixed_ctrl:
@@ -534,8 +618,12 @@ def _build_plate_queue(rows_for_plate, group_assignments, p,
         if kind == "Sample":
             roi      = row["ROI"].strip()
             well_pos = sample_vial(row["Well_ID"], sample_slot, inst)
-            sid      = f"{prefix}_{sample_load}_{roi}"
+            load     = row.get("_load") or sample_load
+            sid      = "_".join(x for x in (prefix, load, roi) if x) + (f"_r{row['_rep']}" if row.get("_rep") else "")
             qrow     = make_row(well_pos, sid, sample_path, sep_method, inj_method, ms_method, proc_method)
+            if row.get("_inj_vol") is not None:
+                qrow["_inj_vol"]     = row["_inj_vol"]
+                qrow["Volume [µl]"]  = _num(row["_inj_vol"])
             qrow.update({"_well": normalize_well(row["Well_ID"]), "_group": roi_group.get(roi, ""),
                          "_block": orig_blocks.get(roi_group.get(roi, ""), "")})
             queue_pl.append(qrow)
@@ -597,11 +685,9 @@ def build_queue_core(csv_bytes: bytes, group_assignments: dict, p: dict,
     default_sample_slot   = p.get("sample_slot", "Slot1")
     default_ctrl_start    = p.get("ctrl_start_slot", 2)
 
-    text   = csv_bytes.decode("utf-8-sig")
-    reader = csv.DictReader(io.StringIO(text))
-    reader.fieldnames = [h.strip() for h in reader.fieldnames]
-    all_rows  = list(reader)
-    has_plate = "Plate" in (reader.fieldnames or [])
+    all_rows, fields, _ = read_sample_rows(csv_bytes)
+    all_rows  = apply_sample_table(all_rows, p.get("sample_table"))
+    has_plate = "Plate" in fields
 
     # Split rows by plate
     plate_rows = {}
@@ -811,7 +897,8 @@ def render_ms_queue_tab():
     st.header("MS Sample Queue")
 
     for key in ("msq_results", "msq_zip", "msq_last", "msq_group_assignments",
-                "msq_block_labels", "msq_csv_hash", "msq_overrides", "msq_last_key"):
+                "msq_block_labels", "msq_csv_hash", "msq_overrides", "msq_last_key",
+                "msq_sample_table"):
         if key not in st.session_state:
             st.session_state[key] = None
 
@@ -836,36 +923,48 @@ def render_ms_queue_tab():
     # 2. Naming and loads
     st.divider()
     st.subheader("2. Naming and loads")
+    zoom_name = {}
     if is_zoom:
-        lc_opts = ZOOM_LC_SHORT[lc_system] + ["Custom"]
-        ms_opts = list(ZOOM_MS_METHODS.keys()) + ["Custom"]
+        c1, c2, c3, c4 = st.columns(4)
+        initials = c1.text_input("Initials", value="FK", key="msq_initials")
+        zoom_name["ms"] = c2.text_input("MS", value=ZOOM_MS_SHORT, key="msq_z_ms")
+        zoom_name["lc"] = c3.text_input("LC", value=ZOOM_LC_NAME[lc_system], key=f"msq_z_lc_{inst}")
+        zoom_name["gradient"] = c4.text_input("Gradient", value=ZOOM_GRADIENT[lc_system], key=f"msq_z_grad_{inst}")
+
+        d1, d2, d3, d4 = st.columns(4)
+        acq_opts = list(ZOOM_MS_METHODS.keys()) + ["Custom"]
+        acq_sel  = d1.selectbox("Acquisition", acq_opts, key="msq_z_acq_sel")
+        zoom_name["acq"] = d1.text_input("Custom acquisition name", value="", key="msq_z_acq_custom") \
+                           if acq_sel == "Custom" else acq_sel
+        zoom_name["faims"] = d2.checkbox("FAIMS", value=False, key="msq_z_faims")
+        zoom_name["cv"]    = d3.text_input("FAIMS CV (optional)", value="", key="msq_z_cv",
+                                           disabled=not zoom_name["faims"],
+                                           help="e.g. -50, or a sweep -40,-60. Leave empty for a CV sweep in the method.")
+        tags = d4.text_input("Tags (optional)", value="", key="msq_tags",
+                             help="Appended after the gradient, e.g. peptide or HighLoad.")
+        lc_short, ms_short = zoom_name["lc"], zoom_name["acq"]
     else:
-        lc_opts, ms_opts = LC_OPTIONS, MS_OPTIONS
-
-    c1, c2, c3, c4 = st.columns([1, 2, 2, 2])
-    initials = c1.text_input("Initials", value="FK", key="msq_initials")
-
-    lc_sel   = c2.selectbox("LC short name", lc_opts, key=f"msq_lc_sel_{inst}")
-    lc_short = c2.text_input("Custom LC short name", value="", key=f"msq_lc_custom_{inst}") \
-               if lc_sel == "Custom" else lc_sel
-
-    ms_sel   = c3.selectbox("MS method", ms_opts, key=f"msq_ms_sel_{inst}")
-    ms_short = c3.text_input("Custom MS short name", value="", key=f"msq_ms_custom_{inst}") \
-               if ms_sel == "Custom" else ms_sel
-
-    tags = c4.text_input("Tags (optional)", value="", key="msq_tags",
-                         help="Inserted after the MS short name, e.g. FAIMS50CV or peptide.")
+        c1, c2, c3, c4 = st.columns([1, 2, 2, 2])
+        initials = c1.text_input("Initials", value="FK", key="msq_initials")
+        lc_sel   = c2.selectbox("LC short name", LC_OPTIONS, key="msq_lc_sel_ultra")
+        lc_short = c2.text_input("Custom LC short name", value="", key="msq_lc_custom_ultra") \
+                   if lc_sel == "Custom" else lc_sel
+        ms_sel   = c3.selectbox("MS method", MS_OPTIONS, key="msq_ms_sel_ultra")
+        ms_short = c3.text_input("Custom MS short name", value="", key="msq_ms_custom_ultra") \
+                   if ms_sel == "Custom" else ms_sel
+        tags = c4.text_input("Tags (optional)", value="", key="msq_tags",
+                             help="Appended after the MS short name.")
     tags = re.sub(r"\s+", "_", tags.strip())
 
     c5, c6, c7, c8, c9 = st.columns(5)
-    sample_load   = c5.text_input("Sample load",   value="20ul", key="msq_sload")
+    sample_load   = c5.text_input("Sample load (optional)", value="" if is_zoom else "20ul",
+                                  key=f"msq_sload_{'zoom' if is_zoom else 'ultra'}",
+                                  help="Any text, e.g. 500pg, 2ul, 20ng. Empty is left out of the name. "
+                                       "Per sample overrides go in the sample table below.").strip()
     use_k562      = c6.checkbox("K562",             value=True,   key="msq_k562")
     k562_load     = c7.text_input("K562 load",      value="1ng",  key="msq_k562l") if use_k562     else ""
     use_supermix  = c8.checkbox("Supermix",         value=True,   key="msq_smix")
     supermix_load = c9.text_input("Supermix load",  value="20ng", key="msq_smixl") if use_supermix else ""
-
-    _pref = f"{date}_{initials}_{lc_short}_{ms_short}" + (f"_{tags}" if tags else "")
-    st.caption(f"Sample ID pattern: `{_pref}_{sample_load}_<ROI>`")
 
     inj_vol = {}
     if is_zoom:
@@ -875,14 +974,45 @@ def render_ms_queue_tab():
         inj_vol["Supermix"] = v3.number_input("Inj Vol Supermix (µl)", min_value=0.0, value=1.0, step=0.1, key="msq_iv_m")
         inj_vol["Blank"]    = v4.number_input("Inj Vol blank (µl)",    min_value=0.0, value=1.0, step=0.1, key="msq_iv_b")
 
+    # Name preview and field help
+    _np = dict(date=date, initials=initials, lc_short=lc_short, ms_short=ms_short, tags=tags,
+               inst=inst, zoom_name=zoom_name)
+    _pre = name_prefix(_np)
+    _ex  = "_".join(x for x in (_pre, sample_load, "H20_core1") if x)
+    with st.expander("Naming help", expanded=False):
+        if is_zoom:
+            st.markdown(
+                "- **Pattern**: date, initials, MS, LC, FAIMS, Acquisition, Gradient, Tags, load, sample. Empty fields are skipped.\n"
+                "- **MS**: instrument short name, e.g. `Zoom`.\n"
+                "- **LC**: `VanquishNeo` or `Evosep`, set by the LC system.\n"
+                "- **FAIMS**: tick to add `FAIMS`. CV `-50` gives `FAIMSneg50`, a sweep `-40,-60` gives `FAIMSneg40neg60`.\n"
+                "- **Acquisition**: MS method short name, e.g. `defaultDIA` or `hybridDIA`.\n"
+                "- **Gradient**: e.g. `60SPD` or `40SPD`.\n"
+                "- **Tags**: free text, spaces become `_`, e.g. `peptide`.\n"
+                "- **Load**: free text, e.g. `500pg` or `2ul`. Global here, per sample in the sample table.\n"
+                "- **Sample**: name column of the CSV (`ROI`, `Sample`, `sample_name` or `Sample Name`). "
+                "Repeats get `_r2`, `_r3`.\n"
+                "- Controls: `..._1ng_K562_1`, `..._20ng_Supermix_1`, `..._Blank_1`."
+            )
+        else:
+            st.markdown(
+                "- **Pattern**: date, initials, LC, MS, Tags, load, sample.\n"
+                "- **Load**: free text, e.g. `20ul`. Global here, per sample in the sample table.\n"
+                "- **Sample**: name column of the CSV (`ROI`, `Sample`, `sample_name` or `Sample Name`). "
+                "Repeats get `_r2`, `_r3`.\n"
+                "- Controls: `..._1ng_K562_1`, `..._20ng_Supermix_1`, `..._Blank_1`."
+            )
+    st.caption(f"Example Sample ID: `{_ex}`")
+
     # 3. Methods and data paths
     st.divider()
     st.subheader("3. Methods and data paths")
     with st.expander("Instrument method paths", expanded=False):
         if is_zoom:
             sep_method = inj_method = proc_method = ""
-            ms_method  = st.text_area("Instrument Method", value=ZOOM_MS_METHODS.get(ms_short, ""),
-                                      height=60, key=f"msq_ms_{inst}_{ms_short}")
+            _fkey      = "FAIMS" if zoom_name["faims"] else "noFAIMS"
+            ms_method  = st.text_area("Instrument Method", value=ZOOM_MS_METHODS.get(ms_short, {}).get(_fkey, ""),
+                                      height=60, key=f"msq_ms_{inst}_{ms_short}_{_fkey}")
             st.caption("Dummy presets from methods.csv until the real methods are set.")
         else:
             default_sep              = LC_METHODS.get(lc_short, "")
@@ -935,15 +1065,21 @@ def render_ms_queue_tab():
         st.session_state.msq_group_assignments = None
         st.session_state.msq_results           = None
         st.session_state.msq_block_labels      = None
+        st.session_state.msq_sample_table      = None
         st.session_state.msq_csv_hash          = csv_hash
 
     st.caption(f"Output stem: `{stem}`")
 
-    # Parse samples for grouping editor
-    text   = csv_bytes.decode("utf-8-sig")
-    reader = csv.DictReader(io.StringIO(text))
-    reader.fieldnames = [h.strip() for h in reader.fieldnames]
-    all_rows = list(reader)
+    # Parse samples, sample name column can be ROI, Sample, sample_name or Sample Name
+    all_rows, fields, name_col = read_sample_rows(csv_bytes)
+    if not name_col:
+        st.error("No sample name column found. Expected one of: " + ", ".join(SAMPLE_COLS) + ".")
+        return
+    if "Well_ID" not in fields:
+        st.error("No `Well_ID` column found in the sample list.")
+        return
+    if name_col != "ROI":
+        st.caption(f"Sample names read from column `{name_col}`.")
     samples  = [r for r in all_rows if r.get("Dropout {Y/N}", "").strip().upper() != "Y"]
 
     if not samples:
@@ -951,9 +1087,70 @@ def render_ms_queue_tab():
         return
 
     # Detect plates from CSV
-    has_plate_col = "Plate" in (reader.fieldnames or [])
+    has_plate_col = "Plate" in fields
     plate_order   = sorted({r.get("Plate", "Plate1").strip()
                              for r in all_rows}) if has_plate_col else ["Plate1"]
+
+    # Per-sample table, applied with the Update queue button
+    st.markdown("**Sample table**")
+    st.caption("Empty Load or Inj Vol uses the global value. To repeat a sample, add a row and pick "
+               "it again: it runs from the same well directly after the original, named `_r2`, `_r3`. "
+               "Edits apply when you press Update queue.")
+    names    = [r["ROI"].strip() for r in samples]
+    well_of  = {r["ROI"].strip(): r.get("Well_ID", "").strip() for r in samples}
+    plate_of = {r["ROI"].strip(): r.get("Plate", "Plate1").strip() for r in samples}
+    if st.session_state.get("msq_sample_table") is None:
+        def _csv_vol(r):
+            v = str(r.get("Inj Vol", "") or "").strip()
+            try:
+                return float(v)
+            except ValueError:
+                return None
+        st.session_state.msq_sample_table = [
+            {"Sample": n, "Load": str(r.get("Load", "") or "").strip(), "Inj Vol": _csv_vol(r)}
+            for n, r in zip(names, samples)
+        ]
+    table_df = pd.DataFrame(
+        [{"Sample": t["Sample"], "Well": well_of.get(t["Sample"], ""), "Plate": plate_of.get(t["Sample"], ""),
+          "Load": t["Load"], "Inj Vol": t["Inj Vol"]} for t in st.session_state.msq_sample_table],
+        columns=["Sample", "Well", "Plate", "Load", "Inj Vol"],
+    )
+    table_df["Inj Vol"] = table_df["Inj Vol"].astype("float64")
+    with st.form("msq_sample_form", border=False):
+        edited_tbl = st.data_editor(
+            table_df,
+            column_config={
+                "Sample":  st.column_config.SelectboxColumn("Sample", options=names, required=True),
+                "Well":    st.column_config.TextColumn("Well", disabled=True),
+                "Plate":   st.column_config.TextColumn("Plate", disabled=True),
+                "Load":    st.column_config.TextColumn("Load", help="e.g. 500pg, 2ul. Empty uses the global load."),
+                "Inj Vol": st.column_config.NumberColumn("Inj Vol (µl)", min_value=0.0, step=0.1, format="%.2f",
+                                                         help="Empty uses the global injection volume."),
+            },
+            column_order=["Sample", "Well"] + (["Plate"] if has_plate_col else []) + ["Load", "Inj Vol"],
+            num_rows="dynamic", hide_index=True, use_container_width=True, key="msq_sample_editor",
+        )
+        submitted = st.form_submit_button("Update queue", type="primary")
+    if submitted:
+        new_tbl = []
+        for _, r in edited_tbl.iterrows():
+            if pd.isna(r["Sample"]) or not str(r["Sample"]).strip():
+                continue
+            new_tbl.append({"Sample": str(r["Sample"]).strip(),
+                            "Load": "" if pd.isna(r["Load"]) else str(r["Load"]).strip(),
+                            "Inj Vol": None if pd.isna(r["Inj Vol"]) else float(r["Inj Vol"])})
+        st.session_state.msq_sample_table = new_tbl
+        st.session_state.msq_results      = None
+        st.rerun()
+    sample_table = st.session_state.msq_sample_table
+    _listed  = {t["Sample"] for t in sample_table}
+    _n_rep   = len(sample_table) - len(_listed)
+    _missing = [n for n in names if n not in _listed]
+    st.caption(f"{len(names)} samples, {_n_rep} repeat injection(s).")
+    if _missing:
+        st.warning(f"{len(_missing)} sample(s) removed from the table still run with global values. "
+                   f"Mark dropouts in the CSV to exclude them: " + ", ".join(_missing[:10])
+                   + (" ..." if len(_missing) > 10 else ""))
 
     # 5. Randomization
     st.divider()
@@ -1056,7 +1253,7 @@ def render_ms_queue_tab():
 
 
     # Read Group column from CSV if present (piped from Tab 2/3)
-    has_group_col = "Group" in (reader.fieldnames or [])
+    has_group_col = "Group" in fields
     csv_group_map = {}
     if has_group_col:
         for r in all_rows:
@@ -1191,6 +1388,7 @@ def render_ms_queue_tab():
         ms_method=ms_method, proc_method=proc_method,
         sample_path=sample_path, blank_path=blank_path, std_path=std_path,
         stem=stem, inst=inst, inj_vol=inj_vol, fixed_positions=fixed_positions,
+        zoom_name=zoom_name, sample_table=sample_table,
         plate_slot_map=plate_slot_map,
         randomize_mode=randomize_mode,
         block_size=block_size,
@@ -1201,7 +1399,8 @@ def render_ms_queue_tab():
 
     # Rebuild only when something that changes the queue changed
     build_key = (
-        csv_hash, inst, tags, std_path,
+        csv_hash, inst, tags, std_path, tuple(sorted(zoom_name.items())),
+        tuple((t["Sample"], t["Load"], t["Inj Vol"]) for t in sample_table),
         tuple(sorted(inj_vol.items())), tuple(sorted(fixed_positions.items())),
         tuple(sorted(group_assignments.items())),
         tuple(sorted(block_assignments.items())),
@@ -1261,6 +1460,8 @@ def render_ms_queue_tab():
         seq_rows = [
             {"#": n + 1, ("Position" if is_zoom else "Vial"): r.get("Vial", ""),
              ("File Name" if is_zoom else "Sample ID"): r.get("Sample ID", ""),
+             "Inj Vol": r["_inj_vol"] if r.get("_inj_vol") is not None
+                        else (inj_vol.get(r.get("_type", "Sample"), 1) if is_zoom else r.get("Volume [µl]", "")),
              "Comment": r.get("_comment", "")}
             for n, r in enumerate(res.get("queue_rows", []))
         ]
