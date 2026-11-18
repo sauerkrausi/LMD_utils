@@ -956,23 +956,44 @@ def render_ms_queue_tab():
                              help="Appended after the MS short name.")
     tags = re.sub(r"\s+", "_", tags.strip())
 
-    c5, c6, c7, c8, c9 = st.columns(5)
-    sample_load   = c5.text_input("Sample load (optional)", value="" if is_zoom else "20ul",
-                                  key=f"msq_sload_{'zoom' if is_zoom else 'ultra'}",
-                                  help="Any text, e.g. 500pg, 2ul, 20ng. Empty is left out of the name. "
-                                       "Per sample overrides go in the sample table below.").strip()
-    use_k562      = c6.checkbox("K562",             value=True,   key="msq_k562")
-    k562_load     = c7.text_input("K562 load",      value="1ng",  key="msq_k562l") if use_k562     else ""
-    use_supermix  = c8.checkbox("Supermix",         value=True,   key="msq_smix")
-    supermix_load = c9.text_input("Supermix load",  value="20ng", key="msq_smixl") if use_supermix else ""
-
+    # Loads and injection volumes, one row per injection type
+    st.markdown("**Loads and injection volumes**")
+    _w = [1, 2, 2, 3] if is_zoom else [1, 2, 5]
     inj_vol = {}
+
+    h = st.columns(_w)
+    h[1].caption("Load (in the name)")
     if is_zoom:
-        v1, v2, v3, v4, _v5 = st.columns(5)
-        inj_vol["Sample"]   = v1.number_input("Inj Vol sample (µl)",   min_value=0.0, value=1.0, step=0.1, key="msq_iv_s")
-        inj_vol["K562"]     = v2.number_input("Inj Vol K562 (µl)",     min_value=0.0, value=1.0, step=0.1, key="msq_iv_k")
-        inj_vol["Supermix"] = v3.number_input("Inj Vol Supermix (µl)", min_value=0.0, value=1.0, step=0.1, key="msq_iv_m")
-        inj_vol["Blank"]    = v4.number_input("Inj Vol blank (µl)",    min_value=0.0, value=1.0, step=0.1, key="msq_iv_b")
+        h[2].caption("Inj Vol (µl)")
+
+    l1 = st.columns(_w)
+    l1[0].markdown("Sample")
+    sample_load = l1[1].text_input("Sample load (optional)", value="" if is_zoom else "20ul",
+                                   key=f"msq_sload_{'zoom' if is_zoom else 'ultra'}", label_visibility="collapsed",
+                                   placeholder="load, e.g. 500pg",
+                                   help="Any text, e.g. 500pg, 2ul, 20ng. Empty is left out of the name. "
+                                        "Per sample overrides go in the sample table below.").strip()
+
+    l2 = st.columns(_w)
+    use_k562  = l2[0].checkbox("K562", value=True, key="msq_k562")
+    k562_load = l2[1].text_input("K562 load", value="1ng", key="msq_k562l", label_visibility="collapsed",
+                                 disabled=not use_k562)
+    k562_load = k562_load if use_k562 else ""
+
+    l3 = st.columns(_w)
+    use_supermix  = l3[0].checkbox("Supermix", value=True, key="msq_smix")
+    supermix_load = l3[1].text_input("Supermix load", value="20ng", key="msq_smixl", label_visibility="collapsed",
+                                     disabled=not use_supermix)
+    supermix_load = supermix_load if use_supermix else ""
+
+    l4 = st.columns(_w)
+    l4[0].markdown("Blank")
+
+    if is_zoom:
+        inj_vol["Sample"]   = l1[2].number_input("Inj Vol sample (µl)",   min_value=0.0, value=1.0, step=0.1, key="msq_iv_s", label_visibility="collapsed")
+        inj_vol["K562"]     = l2[2].number_input("Inj Vol K562 (µl)",     min_value=0.0, value=1.0, step=0.1, key="msq_iv_k", label_visibility="collapsed", disabled=not use_k562)
+        inj_vol["Supermix"] = l3[2].number_input("Inj Vol Supermix (µl)", min_value=0.0, value=1.0, step=0.1, key="msq_iv_m", label_visibility="collapsed", disabled=not use_supermix)
+        inj_vol["Blank"]    = l4[2].number_input("Inj Vol blank (µl)",    min_value=0.0, value=1.0, step=0.1, key="msq_iv_b", label_visibility="collapsed")
 
     # Name preview and field help
     _np = dict(date=date, initials=initials, lc_short=lc_short, ms_short=ms_short, tags=tags,
