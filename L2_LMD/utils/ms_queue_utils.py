@@ -138,12 +138,12 @@ def normalize_well(well_id):
 
 
 def faims_token(on, cv):
-    """FAIMS plus optional CV(s), - written as neg, e.g. -40,-60 to FAIMSneg40neg60."""
+    """FAIMS plus optional CV(s), - written as neg, e.g. -40,-60 to FAIMS_neg40_neg60."""
     if not on:
         return ""
     parts = [c.strip() for c in re.split(r"[,;\s/]+", cv or "") if c.strip()]
-    cvs   = "".join(re.sub(r"[^A-Za-z0-9]", "", c.replace("-", "neg").replace("+", "pos")) for c in parts)
-    return "FAIMS" + cvs
+    cvs   = "_".join(re.sub(r"[^A-Za-z0-9]", "", c.replace("-", "neg").replace("+", "pos")) for c in parts)
+    return "FAIMS" + (f"_{cvs}" if cvs else "")
 
 
 def name_prefix(p):
@@ -927,8 +927,8 @@ def render_ms_queue_tab():
         st.markdown(
             "- **Pattern**: `date_initials_MS_LC_FAIMS_Acquisition_Gradient_Tags_load_sample`. Empty fields are skipped.\n"
             "- **MS**: instrument, e.g. `Zoom`. **Acquisition**: MS method, e.g. `defaultDIA`, `hybridDIA`.\n"
-            "- **FAIMS**: tick to add `FAIMS`. CV `-50` gives `FAIMSneg50`, a sweep `-40,-60` gives "
-            "`FAIMSneg40neg60`, empty CV gives `FAIMS`.\n"
+            "- **FAIMS**: tick to add `FAIMS`. CV `-50` gives `FAIMS_neg50`, a sweep `-40,-60` gives "
+            "`FAIMS_neg40_neg60`, empty CV gives `FAIMS`.\n"
             "- **LC**: `VanquishNeo` or `Evosep`. **Gradient**: e.g. `60SPD`, `40SPD`.\n"
             "- **Tags**: free text, e.g. `peptide`.\n"
             "- **Load**: free text, e.g. `500pg`, `2ul`. Empty is left out. Per sample values go in the sample table.\n"
