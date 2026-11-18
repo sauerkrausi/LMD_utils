@@ -1,0 +1,4 @@
+sample_name,well,group,load,inj_vol,plate
+Ctrl_1,A1,Ctrl,20ng,1,Plate1
+Ctrl_2,A2,Ctrl,20ng,1,Plate1
+Treat_1,B1,Treat,10ng,2,Plate1
