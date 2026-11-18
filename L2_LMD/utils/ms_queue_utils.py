@@ -1076,7 +1076,7 @@ def render_ms_queue_tab(standalone=False):
     p_rows, p_cols = PLATE_FORMATS[plate_format]
     st.caption({
         "ultra":    "Bruker HyStar queue (XLSX). Positions SlotN:1 to 96 (384: 1 to 384), controls one well per injection.",
-        "zoom_evo": "Xcalibur sequence (CSV). Evosep Slot1 to Slot6, positions SlotN:1 to 96 (A1=1, B1=13), "
+        "zoom_evo": "Evosep Slot1 to Slot6, positions SlotN:1 to 96 (A1=1, B1=13), "
                     "controls one tip per injection.",
         "zoom_neo": "Xcalibur sequence (CSV). Vanquish trays R, G, B, Y, positions A1 to H12, "
                     "controls drawn from fixed vials.",
