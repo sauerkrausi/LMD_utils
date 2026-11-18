@@ -1007,8 +1007,43 @@ def render_ms_queue_tab(standalone=False):
 
     date = datetime.date.today().strftime("%Y%m%d")
 
-    # 1. Instrument
-    st.subheader("1. Instrument")
+    # 1. Sample list
+    st.subheader("1. Sample list")
+    pipe_csv  = None if standalone else st.session_state.get("t3_sample_list")
+    pipe_stem = None if standalone else st.session_state.get("t3_stem")
+    st.markdown(
+        "- **Required**: a sample name column (`ROI`, `Sample`, `sample_name` or `Sample Name`) and a well "
+        "column (`Well_ID` or `well`), wells A1 to H12, or A1 to P24 on 384 plates, `A01` style is fine.\n"
+        "- **Optional**: `Group`, `Load`, `Inj Vol`, `Plate`, `Dropout {Y/N}`. Column names are not case sensitive.\n"
+        "- **CellenONE**: an export with `Location` and `Event Id` works too, the name becomes `Location_EventId`.\n"
+        + ("" if standalone else "- A list piped from Tab 3 is used automatically when nothing is uploaded.\n")
+    )
+    _tpl = find_templates()
+    if _tpl:
+        _tc = st.columns(min(len(_tpl), 4))
+        for i, (fn, data) in enumerate(_tpl.items()):
+            _tc[i % len(_tc)].download_button(f"Template: {fn}", data, file_name=fn, mime="text/csv",
+                                              key=f"msq_tpl_{fn}")
+    uploaded  = st.file_uploader("Upload sample list CSV", type=["csv"], key="msq_upload")
+
+    if uploaded:
+        csv_bytes = uploaded.getvalue()
+        stem      = re.sub(r'^\d{8}', date, uploaded.name.replace(".csv", ""))
+        if st.session_state.msq_last != uploaded.name:
+            st.session_state.msq_results          = None
+            st.session_state.msq_last             = uploaded.name
+            st.session_state.msq_group_assignments = None
+    elif pipe_csv is not None:
+        csv_bytes = pipe_csv
+        stem      = pipe_stem or "sample_list"
+        st.info("Using sample list piped from Tab 3.")
+    else:
+        csv_bytes = stem = None
+
+
+    # 2. Instrument
+    st.divider()
+    st.subheader("2. Instrument")
     i1, i2 = st.columns(2)
     instrument = i1.radio("Instrument", [INST_ULTRA, INST_ZOOM], horizontal=True, key="msq_instrument")
     lc_system  = i2.radio("LC system", [LC_EVOSEP, LC_NEO], horizontal=True, key="msq_lc_system") \
@@ -1034,9 +1069,9 @@ def render_ms_queue_tab(standalone=False):
                     "controls drawn from fixed vials.",
     }[inst])
 
-    # 2. Naming and loads
+    # 3. Naming and loads
     st.divider()
-    st.subheader("2. Naming and loads")
+    st.subheader("3. Naming and loads")
     if is_zoom:
         st.markdown(
             "- **Pattern**: `date_initials_MS_LC_FAIMS_Acquisition_Gradient_Tags_load_sample`. Empty fields are skipped.\n"
@@ -1146,9 +1181,9 @@ def render_ms_queue_tab(standalone=False):
                       + ([f"{_pre}_{k562_load}_K562_1"] if use_k562 else [])
                       + [f"{_pre}_Blank_1"]), language=None)
 
-    # 3. Methods and data paths
+    # 4. Methods and data paths
     st.divider()
-    st.subheader("3. Methods and data paths")
+    st.subheader("4. Methods and data paths")
     with st.expander("Instrument method paths", expanded=False):
         if is_zoom:
             sep_method = inj_method = proc_method = ""
@@ -1180,38 +1215,11 @@ def render_ms_queue_tab(standalone=False):
             blank_path  = cp2.text_input("Blank path", value=rf"{_root}\Blank", key="msq_bpath")
             std_path    = sample_path
 
-    # 4. Sample list
+    # 5. Sample table
     st.divider()
-    st.subheader("4. Sample list")
-    pipe_csv  = None if standalone else st.session_state.get("t3_sample_list")
-    pipe_stem = None if standalone else st.session_state.get("t3_stem")
-    st.markdown(
-        "- **Required**: a sample name column (`ROI`, `Sample`, `sample_name` or `Sample Name`) and a well "
-        f"column (`Well_ID` or `well`), wells A1 to {p_rows[-1]}{p_cols[-1]}, `A01` style is fine.\n"
-        "- **Optional**: `Group`, `Load`, `Inj Vol`, `Plate`, `Dropout {Y/N}`. Column names are not case sensitive.\n"
-        "- **CellenONE**: an export with `Location` and `Event Id` works too, the name becomes `Location_EventId`.\n"
-        + ("" if standalone else "- A list piped from Tab 3 is used automatically when nothing is uploaded.\n")
-    )
-    _tpl = find_templates()
-    if _tpl:
-        _tc = st.columns(min(len(_tpl), 4))
-        for i, (fn, data) in enumerate(_tpl.items()):
-            _tc[i % len(_tc)].download_button(f"Template: {fn}", data, file_name=fn, mime="text/csv",
-                                              key=f"msq_tpl_{fn}")
-    uploaded  = st.file_uploader("Upload sample list CSV", type=["csv"], key="msq_upload")
-
-    if uploaded:
-        csv_bytes = uploaded.getvalue()
-        stem      = re.sub(r'^\d{8}', date, uploaded.name.replace(".csv", ""))
-        if st.session_state.msq_last != uploaded.name:
-            st.session_state.msq_results          = None
-            st.session_state.msq_last             = uploaded.name
-            st.session_state.msq_group_assignments = None
-    elif pipe_csv is not None:
-        csv_bytes = pipe_csv
-        stem      = pipe_stem or "sample_list"
-        st.info("Using sample list piped from Tab 3.")
-    else:
+    st.subheader("5. Sample table")
+    if csv_bytes is None:
+        st.info("Upload a sample list in step 1 to continue.")
         return
 
     # Reset groups if CSV content changed
@@ -1261,7 +1269,6 @@ def render_ms_queue_tab(standalone=False):
                              for r in all_rows}) if has_plate_col else ["Plate1"]
 
     # Per-sample table, applied with the Update queue button
-    st.markdown("**Sample table**")
     st.caption("Empty Load or Inj Vol uses the global value. To repeat a sample, add a row and pick "
                "it again: it runs from the same well directly after the original, named `_r2`, `_r3`. "
                "Edits apply when you press Update queue.")
@@ -1321,9 +1328,9 @@ def render_ms_queue_tab(standalone=False):
                    f"Mark dropouts in the CSV to exclude them: " + ", ".join(_missing[:10])
                    + (" ..." if len(_missing) > 10 else ""))
 
-    # 5. Randomization
+    # 6. Randomization
     st.divider()
-    st.subheader("5. Randomization")
+    st.subheader("6. Randomization")
     st.caption("Samples are shuffled first, blanks and standards are then inserted by the rules below. "
                "Each sample keeps its own well. Run number, well and seed go to run_order.csv"
                + (" and the Xcalibur Comment column." if is_zoom else "."))
@@ -1334,9 +1341,9 @@ def render_ms_queue_tab(standalone=False):
     run_seed = _ra2.number_input("Random seed", min_value=0, max_value=9999, value=42, step=1,
                                  key="msq_run_seed", disabled=randomize_mode == "Off")
 
-    # 6. Plates and control positions
+    # 7. Plates and control positions
     st.divider()
-    st.subheader("6. Plates and control positions")
+    st.subheader("7. Plates and control positions")
     fixed_positions = {}
     saved_slot_map  = st.session_state.get(f"msq_plate_slot_map_{inst}") or {}
 
@@ -1455,7 +1462,7 @@ def render_ms_queue_tab(standalone=False):
 
     # Block editor, one row per block key
     st.divider()
-    st.subheader("7. Block assignment")
+    st.subheader("8. Block assignment")
     st.caption(
         "K562 + Supermix + Blank at each block start, counters reset there. "
         "Inside a block the samples of all its groups are batched together, a Blank runs "
@@ -1526,9 +1533,9 @@ def render_ms_queue_tab(standalone=False):
         f"**{b}** ({len(gs)} groups)" for b, gs in block_summary.items()
     ))
 
-    # 8. Control intervals
+    # 9. Control intervals
     st.divider()
-    st.subheader("8. Control intervals")
+    st.subheader("9. Control intervals")
     _ro1, _ro2, _ro3, _ro4 = st.columns(4)
     block_size = _ro1.number_input("Blank interval (samples)", min_value=1, max_value=96, step=1,
                                    key="msq_block_size",
@@ -1585,9 +1592,9 @@ def render_ms_queue_tab(standalone=False):
         tuple(sorted((o["action"], o["type"], o["after"]) for o in overrides)),
     )
 
-    # 9. Run sequence and adjustments
+    # 10. Run sequence and adjustments
     st.divider()
-    st.subheader("9. Run sequence and adjustments")
+    st.subheader("10. Run sequence and adjustments")
     if st.session_state.msq_last_key != build_key or not st.session_state.msq_results:
         with st.spinner("Building queue..."):
             res = build_queue_core(csv_bytes, group_assignments, params,
@@ -1709,9 +1716,9 @@ def render_ms_queue_tab(standalone=False):
         st.session_state.msq_overrides = new_ov
         st.rerun()
 
-    # 10. Plate maps
+    # 11. Plate maps
     st.divider()
-    st.subheader("10. Plate maps")
+    st.subheader("11. Plate maps")
     all_plate_items = []
     for key, data in res["sample_slot_outputs"].items():
         all_plate_items.append((f"{data['sample_slot']} - {data['plate']} Samples", data["png"]))
@@ -1725,9 +1732,9 @@ def render_ms_queue_tab(standalone=False):
                 st.markdown(f"**{title}**")
                 st.image(png, use_container_width=True)
 
-    # 11. Downloads
+    # 12. Downloads
     st.divider()
-    st.subheader("11. Downloads")
+    st.subheader("12. Downloads")
     stem_out = res["stem"]
 
     def build_all_zip(res, msq_zip_bytes):
