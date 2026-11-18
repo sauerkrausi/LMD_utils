@@ -923,44 +923,75 @@ def render_ms_queue_tab():
     # 2. Naming and loads
     st.divider()
     st.subheader("2. Naming and loads")
-    zoom_name = {}
     if is_zoom:
-        c1, c2, c3, c4 = st.columns(4)
-        initials = c1.text_input("Initials", value="FK", key="msq_initials")
-        zoom_name["ms"] = c2.text_input("MS", value=ZOOM_MS_SHORT, key="msq_z_ms")
-        zoom_name["lc"] = c3.text_input("LC", value=ZOOM_LC_NAME[lc_system], key=f"msq_z_lc_{inst}")
-        zoom_name["gradient"] = c4.text_input("Gradient", value=ZOOM_GRADIENT[lc_system], key=f"msq_z_grad_{inst}")
-
-        d1, d2, d3, d4 = st.columns(4)
-        acq_opts = list(ZOOM_MS_METHODS.keys()) + ["Custom"]
-        acq_sel  = d1.selectbox("Acquisition", acq_opts, key="msq_z_acq_sel")
-        zoom_name["acq"] = d1.text_input("Custom acquisition name", value="", key="msq_z_acq_custom") \
-                           if acq_sel == "Custom" else acq_sel
-        zoom_name["faims"] = d2.checkbox("FAIMS", value=False, key="msq_z_faims")
-        zoom_name["cv"]    = d3.text_input("FAIMS CV (optional)", value="", key="msq_z_cv",
-                                           disabled=not zoom_name["faims"],
-                                           help="e.g. -50, or a sweep -40,-60. Leave empty for a CV sweep in the method.")
-        tags = d4.text_input("Tags (optional)", value="", key="msq_tags",
-                             help="Appended after the gradient, e.g. peptide or HighLoad.")
-        lc_short, ms_short = zoom_name["lc"], zoom_name["acq"]
+        st.markdown(
+            "- **Pattern**: `date_initials_MS_LC_FAIMS_Acquisition_Gradient_Tags_load_sample`. Empty fields are skipped.\n"
+            "- **MS**: instrument, e.g. `Zoom`. **Acquisition**: MS method, e.g. `defaultDIA`, `hybridDIA`.\n"
+            "- **FAIMS**: tick to add `FAIMS`. CV `-50` gives `FAIMSneg50`, a sweep `-40,-60` gives "
+            "`FAIMSneg40neg60`, empty CV gives `FAIMS`.\n"
+            "- **LC**: `VanquishNeo` or `Evosep`. **Gradient**: e.g. `60SPD`, `40SPD`.\n"
+            "- **Tags**: free text, e.g. `peptide`.\n"
+            "- **Load**: free text, e.g. `500pg`, `2ul`. Empty is left out. Per sample values go in the sample table.\n"
+            "- **Inj Vol**: µl per injection type. Per sample values go in the sample table.\n"
+            "- **Sample**: name column of the CSV (`ROI`, `Sample`, `sample_name` or `Sample Name`). Repeats get `_r2`, `_r3`."
+        )
     else:
-        c1, c2, c3, c4 = st.columns([1, 2, 2, 2])
-        initials = c1.text_input("Initials", value="FK", key="msq_initials")
-        lc_sel   = c2.selectbox("LC short name", LC_OPTIONS, key="msq_lc_sel_ultra")
-        lc_short = c2.text_input("Custom LC short name", value="", key="msq_lc_custom_ultra") \
-                   if lc_sel == "Custom" else lc_sel
-        ms_sel   = c3.selectbox("MS method", MS_OPTIONS, key="msq_ms_sel_ultra")
-        ms_short = c3.text_input("Custom MS short name", value="", key="msq_ms_custom_ultra") \
-                   if ms_sel == "Custom" else ms_sel
-        tags = c4.text_input("Tags (optional)", value="", key="msq_tags",
-                             help="Appended after the MS short name.")
-    tags = re.sub(r"\s+", "_", tags.strip())
+        st.markdown(
+            "- **Pattern**: `date_initials_LC_MS_Tags_load_sample`.\n"
+            "- **LC** and **MS**: method short names, paths are filled in section 3.\n"
+            "- **Tags**: free text, e.g. `peptide`.\n"
+            "- **Load**: free text, e.g. `20ul`. Per sample values go in the sample table.\n"
+            "- **Sample**: name column of the CSV (`ROI`, `Sample`, `sample_name` or `Sample Name`). Repeats get `_r2`, `_r3`."
+        )
 
-    # Loads and injection volumes, one row per injection type
-    st.markdown("**Loads and injection volumes**")
-    _w = [1, 2, 2, 3] if is_zoom else [1, 2, 5]
+    t1, t2 = st.columns(2)
+    initials = t1.text_input("Initials", value="FK", key="msq_initials", help="Your initials, second field of the name.")
+    tags     = t2.text_input("Tags (optional)", value="", key="msq_tags",
+                             help="Free text added after the method fields, e.g. peptide. Spaces become _.")
+    tags     = re.sub(r"\s+", "_", tags.strip())
+
+    zoom_name = {}
+    col_ms, col_lc = st.columns(2)
+    with col_ms:
+        st.markdown("**MS**")
+        if is_zoom:
+            zoom_name["ms"] = st.text_input("MS", value=ZOOM_MS_SHORT, key="msq_z_ms",
+                                            help="Instrument short name, e.g. Zoom.")
+            acq_opts = list(ZOOM_MS_METHODS.keys()) + ["Custom"]
+            acq_sel  = st.selectbox("Acquisition", acq_opts, key="msq_z_acq_sel",
+                                    help="MS method short name, also picks the default instrument method path.")
+            zoom_name["acq"] = st.text_input("Custom acquisition name", value="", key="msq_z_acq_custom") \
+                               if acq_sel == "Custom" else acq_sel
+            f1, f2 = st.columns([1, 2])
+            zoom_name["faims"] = f1.checkbox("FAIMS", value=False, key="msq_z_faims",
+                                             help="Adds FAIMS to the name and uses the FAIMS method path.")
+            zoom_name["cv"] = f2.text_input("FAIMS CV (optional)", value="", key="msq_z_cv",
+                                            help="e.g. -50, or a sweep -40,-60. Written as neg50.") \
+                              if zoom_name["faims"] else ""
+        else:
+            ms_sel   = st.selectbox("MS method", MS_OPTIONS, key="msq_ms_sel_ultra",
+                                    help="MS method short name, also picks the default method paths.")
+            ms_short = st.text_input("Custom MS short name", value="", key="msq_ms_custom_ultra") \
+                       if ms_sel == "Custom" else ms_sel
+    with col_lc:
+        st.markdown("**LC**")
+        if is_zoom:
+            zoom_name["lc"] = st.text_input("LC", value=ZOOM_LC_NAME[lc_system], key=f"msq_z_lc_{inst}",
+                                            help="LC system short name, set by the LC system in section 1.")
+            zoom_name["gradient"] = st.text_input("Gradient", value=ZOOM_GRADIENT[lc_system], key=f"msq_z_grad_{inst}",
+                                                  help="Gradient or throughput, e.g. 60SPD or 40SPD.")
+        else:
+            lc_sel   = st.selectbox("LC method", LC_OPTIONS, key="msq_lc_sel_ultra",
+                                    help="LC method short name, also picks the default separation method path.")
+            lc_short = st.text_input("Custom LC short name", value="", key="msq_lc_custom_ultra") \
+                       if lc_sel == "Custom" else lc_sel
+    if is_zoom:
+        lc_short, ms_short = zoom_name["lc"], zoom_name["acq"]
+
+    # Standards: one row per injection type
+    st.markdown("**Standards and loads**")
+    _w = [1, 2, 2]
     inj_vol = {}
-
     h = st.columns(_w)
     h[1].caption("Load (in the name)")
     if is_zoom:
@@ -968,11 +999,9 @@ def render_ms_queue_tab():
 
     l1 = st.columns(_w)
     l1[0].markdown("Sample")
-    sample_load = l1[1].text_input("Sample load (optional)", value="" if is_zoom else "20ul",
+    sample_load = l1[1].text_input("Sample load", value="" if is_zoom else "20ul",
                                    key=f"msq_sload_{'zoom' if is_zoom else 'ultra'}", label_visibility="collapsed",
-                                   placeholder="load, e.g. 500pg",
-                                   help="Any text, e.g. 500pg, 2ul, 20ng. Empty is left out of the name. "
-                                        "Per sample overrides go in the sample table below.").strip()
+                                   placeholder="optional, e.g. 500pg").strip()
 
     l2 = st.columns(_w)
     use_k562  = l2[0].checkbox("K562", value=True, key="msq_k562")
@@ -990,40 +1019,18 @@ def render_ms_queue_tab():
     l4[0].markdown("Blank")
 
     if is_zoom:
-        inj_vol["Sample"]   = l1[2].number_input("Inj Vol sample (µl)",   min_value=0.0, value=1.0, step=0.1, key="msq_iv_s", label_visibility="collapsed")
-        inj_vol["K562"]     = l2[2].number_input("Inj Vol K562 (µl)",     min_value=0.0, value=1.0, step=0.1, key="msq_iv_k", label_visibility="collapsed", disabled=not use_k562)
-        inj_vol["Supermix"] = l3[2].number_input("Inj Vol Supermix (µl)", min_value=0.0, value=1.0, step=0.1, key="msq_iv_m", label_visibility="collapsed", disabled=not use_supermix)
-        inj_vol["Blank"]    = l4[2].number_input("Inj Vol blank (µl)",    min_value=0.0, value=1.0, step=0.1, key="msq_iv_b", label_visibility="collapsed")
+        inj_vol["Sample"]   = l1[2].number_input("Inj Vol sample",   min_value=0.0, value=1.0, step=0.1, key="msq_iv_s", label_visibility="collapsed")
+        inj_vol["K562"]     = l2[2].number_input("Inj Vol K562",     min_value=0.0, value=1.0, step=0.1, key="msq_iv_k", label_visibility="collapsed", disabled=not use_k562)
+        inj_vol["Supermix"] = l3[2].number_input("Inj Vol Supermix", min_value=0.0, value=1.0, step=0.1, key="msq_iv_m", label_visibility="collapsed", disabled=not use_supermix)
+        inj_vol["Blank"]    = l4[2].number_input("Inj Vol blank",    min_value=0.0, value=1.0, step=0.1, key="msq_iv_b", label_visibility="collapsed")
 
-    # Name preview and field help
-    _np = dict(date=date, initials=initials, lc_short=lc_short, ms_short=ms_short, tags=tags,
-               inst=inst, zoom_name=zoom_name)
-    _pre = name_prefix(_np)
-    _ex  = "_".join(x for x in (_pre, sample_load, "H20_core1") if x)
-    with st.expander("Naming help", expanded=False):
-        if is_zoom:
-            st.markdown(
-                "- **Pattern**: date, initials, MS, LC, FAIMS, Acquisition, Gradient, Tags, load, sample. Empty fields are skipped.\n"
-                "- **MS**: instrument short name, e.g. `Zoom`.\n"
-                "- **LC**: `VanquishNeo` or `Evosep`, set by the LC system.\n"
-                "- **FAIMS**: tick to add `FAIMS`. CV `-50` gives `FAIMSneg50`, a sweep `-40,-60` gives `FAIMSneg40neg60`.\n"
-                "- **Acquisition**: MS method short name, e.g. `defaultDIA` or `hybridDIA`.\n"
-                "- **Gradient**: e.g. `60SPD` or `40SPD`.\n"
-                "- **Tags**: free text, spaces become `_`, e.g. `peptide`.\n"
-                "- **Load**: free text, e.g. `500pg` or `2ul`. Global here, per sample in the sample table.\n"
-                "- **Sample**: name column of the CSV (`ROI`, `Sample`, `sample_name` or `Sample Name`). "
-                "Repeats get `_r2`, `_r3`.\n"
-                "- Controls: `..._1ng_K562_1`, `..._20ng_Supermix_1`, `..._Blank_1`."
-            )
-        else:
-            st.markdown(
-                "- **Pattern**: date, initials, LC, MS, Tags, load, sample.\n"
-                "- **Load**: free text, e.g. `20ul`. Global here, per sample in the sample table.\n"
-                "- **Sample**: name column of the CSV (`ROI`, `Sample`, `sample_name` or `Sample Name`). "
-                "Repeats get `_r2`, `_r3`.\n"
-                "- Controls: `..._1ng_K562_1`, `..._20ng_Supermix_1`, `..._Blank_1`."
-            )
-    st.caption(f"Example Sample ID: `{_ex}`")
+    # Live example name
+    _pre = name_prefix(dict(date=date, initials=initials, lc_short=lc_short, ms_short=ms_short,
+                            tags=tags, inst=inst, zoom_name=zoom_name))
+    st.markdown("**Example names**")
+    st.code("\n".join(["_".join(x for x in (_pre, sample_load, "H20_core1") if x)]
+                      + ([f"{_pre}_{k562_load}_K562_1"] if use_k562 else [])
+                      + [f"{_pre}_Blank_1"]), language=None)
 
     # 3. Methods and data paths
     st.divider()
