@@ -53,6 +53,11 @@ MS_OPTIONS = list(MS_METHODS.keys()) + ["Custom"]
 
 ROWS      = list("ABCDEFGH")
 COLS      = list(range(1, 13))
+PLATE_FORMATS = {
+    "96":  (list("ABCDEFGH"),         list(range(1, 13))),
+    "384": (list("ABCDEFGHIJKLMNOP"), list(range(1, 25))),
+}
+WELL_RE = re.compile(r"^\s*([A-Za-z])\s*0*(\d+)\s*$")
 GROUP_SIZE = 6
 SUPERMIX_INTERVAL = 12
 
@@ -106,10 +111,23 @@ GREY_REPLACEMENTS = {14: "#777777", 15: "#555555"}
 # ============================================================
 # HELPERS
 # ============================================================
-def well_to_slot1(well_id):
+def well_to_slot1(well_id, n_cols=12):
     row = ord(well_id[0].upper()) - ord('A')
     col = int(well_id[1:])
-    return f"Slot1:{row * 12 + col}"
+    return f"Slot1:{row * n_cols + col}"
+
+
+def check_well(raw, rows, cols):
+    """Normalized well or None plus the reason."""
+    m = WELL_RE.match("" if raw is None else str(raw))
+    if not m:
+        return None, "not a well id"
+    r, c = m.group(1).upper(), int(m.group(2))
+    if r not in rows:
+        return None, f"row {r} outside plate"
+    if c not in cols:
+        return None, f"column {c} outside plate"
+    return f"{r}{c}", None
 
 
 def index_to_well(index):
@@ -160,19 +178,66 @@ def name_prefix(p):
     return "_".join(str(x).strip() for x in parts)
 
 
+# Column aliases, matched case insensitively, so the shared templates load here and in msQ
+COL_ALIASES = {
+    "Well_ID": ["well_id", "well id", "wellid", "well", "location"],
+    "Group":   ["group"],
+    "Load":    ["load"],
+    "Inj Vol": ["inj vol", "inj_vol", "injvol", "inj vol (µl)", "inj_vol_ul"],
+    "Plate":   ["plate"],
+}
+
+
+def _key(h):
+    return re.sub(r"\s+", " ", h.strip().lower())
+
+
 def read_sample_rows(csv_bytes):
-    """Parse the sample list, map the sample name column to ROI. Returns rows, fieldnames, source column."""
+    """Parse the sample list, map the sample name column to ROI and known aliases to their
+    canonical names. Returns rows, fieldnames, source column."""
     text   = csv_bytes.decode("utf-8-sig")
     reader = csv.DictReader(io.StringIO(text))
     fields = [h.strip() for h in (reader.fieldnames or [])]
     reader.fieldnames = fields
     rows   = list(reader)
-    src    = next((c for c in SAMPLE_COLS if c in fields), None)
+    by_key = {_key(f): f for f in fields}
+    for canon, aliases in COL_ALIASES.items():
+        if canon in fields:
+            continue
+        src_f = next((by_key[a] for a in aliases if a in by_key), None)
+        if src_f:
+            for r in rows:
+                r[canon] = r.get(src_f, "")
+            fields = fields + [canon]
+    by_key = {_key(f): f for f in fields}
+    src    = next((by_key[_key(c)] for c in SAMPLE_COLS if _key(c) in by_key), None)
+
+    # CellenONE export: Location plus Event Id, name becomes Location_EventId
+    ev_col = next((by_key[a] for a in ("event id", "event_id", "eventid") if a in by_key), None)
+    if not src and ev_col and "Well_ID" in fields:
+        for r in rows:
+            ev  = str(r.get(ev_col, "")).strip()
+            ev  = ev[:-2] if ev.endswith(".0") else ev
+            w   = r.get("Well_ID", "").strip()
+            w   = normalize_well(w) if WELL_RE.match(w) else w
+            r["ROI"] = f"{w}_{ev}"
+        return rows, fields + ["ROI"], f"{ev_col} (CellenONE)"
     if src and src != "ROI":
         for r in rows:
             r["ROI"] = r.get(src, "")
         fields = fields + ["ROI"]
     return rows, fields, src
+
+
+def find_templates():
+    """Template CSVs from the repo level templates folder, else next to the app."""
+    from pathlib import Path
+    here = Path(__file__).resolve()
+    for d in (here.parents[2] / "templates", here.parents[1] / "templates", here.parents[1]):
+        files = sorted(d.glob("*template*.csv")) if d.is_dir() else []
+        if files:
+            return {f.name: f.read_bytes() for f in files}
+    return {}
 
 
 def apply_sample_table(rows, table):
@@ -207,11 +272,11 @@ def _num(v):
     return int(v) if float(v).is_integer() else v
 
 
-def sample_vial(well_id, sample_slot, inst):
+def sample_vial(well_id, sample_slot, inst, n_cols=12):
     """Ultra and Evosep: SlotN:pos, row wise. Vanquish: tray:well."""
     if inst == "zoom_neo":
         return f"{sample_slot}:{normalize_well(well_id)}"
-    return well_to_slot1(well_id.strip()).replace("Slot1", sample_slot)
+    return well_to_slot1(normalize_well(well_id), n_cols).replace("Slot1", sample_slot)
 
 
 def _xcal_cell(v):
@@ -257,17 +322,21 @@ def make_row(vial, sample_id, data_path, sep_method, inj_method, ms_method, proc
 # PLATE VISUALIZATION
 # ============================================================
 def plot_plate(grid, color_map, title, label_map=None, legend_group_map=None,
-               label_color_map=None) -> bytes:
-    fig, ax = plt.subplots(figsize=(14, 8))
-    ax.set_xlim(-0.5, 12.5)
-    ax.set_ylim(-0.5, 8.5)
+               label_color_map=None, rows=None, cols=None) -> bytes:
+    rows = rows or ROWS
+    cols = cols or COLS
+    n_r, n_c = len(rows), len(cols)
+    small = n_c > 12
+    fig, ax = plt.subplots(figsize=(14, 8) if not small else (18, 12))
+    ax.set_xlim(-0.5, n_c + 0.5)
+    ax.set_ylim(-0.5, n_r + 0.5)
     ax.set_aspect("equal")
     ax.axis("off")
     ax.set_title(title, fontsize=14, fontweight="bold", pad=12)
 
-    for r_idx, r in enumerate(ROWS):
-        for c_idx, c in enumerate(COLS):
-            x, y  = c_idx, 7 - r_idx
+    for r_idx, r in enumerate(rows):
+        for c_idx, c in enumerate(cols):
+            x, y  = c_idx, (n_r - 1) - r_idx
             label = grid[r][c]
             color = color_map.get(label, "white") if label else "whitesmoke"
             edge  = "#aaaaaa" if not label else "#444444"
@@ -275,18 +344,18 @@ def plot_plate(grid, color_map, title, label_map=None, legend_group_map=None,
             display    = (label_map or {}).get(label, label)
             font_color = (label_color_map or {}).get(label, "black")
             if display:
-                fsize = 4.5 if len(display) > 10 else 5.5
+                fsize = (4.5 if len(display) > 10 else 5.5) * (0.6 if small else 1)
                 ax.text(x, y, display, ha="center", va="center",
                         fontsize=fsize, zorder=3, color=font_color, clip_on=True)
 
-    for r_idx, r in enumerate(ROWS):
-        ax.text(-0.55, 7 - r_idx, r, ha="right", va="center", fontsize=9, fontweight="bold")
-    for c_idx, c in enumerate(COLS):
-        ax.text(c_idx, 8.0, str(c), ha="center", va="bottom", fontsize=9, fontweight="bold")
+    for r_idx, r in enumerate(rows):
+        ax.text(-0.55, (n_r - 1) - r_idx, r, ha="right", va="center", fontsize=9, fontweight="bold")
+    for c_idx, c in enumerate(cols):
+        ax.text(c_idx, n_r, str(c), ha="center", va="bottom", fontsize=9, fontweight="bold")
 
     seen = {}
-    for r in ROWS:
-        for c in COLS:
+    for r in rows:
+        for c in cols:
             lbl = grid[r][c]
             if lbl and lbl not in seen:
                 seen[lbl] = color_map.get(lbl, "white")
@@ -302,10 +371,15 @@ def plot_plate(grid, color_map, title, label_map=None, legend_group_map=None,
         patches = [mpatches.Patch(color=seen[l], label=(label_map or {}).get(l, l))
                    for l in sorted(seen)]
 
-    if patches:
-        fig.legend(handles=patches, loc="lower center",
-                   bbox_to_anchor=(0.5, -0.02), ncol=min(len(patches), 6),
-                   fontsize=7, framealpha=0.9, title="Legend", title_fontsize=8)
+    # Too many entries (e.g. one per cell) would cover the plate
+    if patches and len(patches) <= 30:
+        if small:
+            fig.legend(handles=patches, loc="upper center", bbox_to_anchor=(0.5, 0.0),
+                       ncol=min(len(patches), 8), fontsize=7, framealpha=0.9, title="Legend", title_fontsize=8)
+        else:
+            fig.legend(handles=patches, loc="lower center",
+                       bbox_to_anchor=(0.5, -0.02), ncol=min(len(patches), 6),
+                       fontsize=7, framealpha=0.9, title="Legend", title_fontsize=8)
 
     plt.tight_layout()
     buf = io.BytesIO()
@@ -402,6 +476,8 @@ def build_run_events(groups_seen, group_map, p, block_assignments=None, closing_
     use_supermix = p["use_supermix"]
     block_size   = int(p.get("block_size", GROUP_SIZE))
     smix_every   = int(p.get("smix_interval", SUPERMIX_INTERVAL))
+    k562_w_smix  = bool(p.get("k562_with_smix")) and use_k562
+    std_on       = use_supermix or k562_w_smix
 
     events = []
     since_smix = since_blank = 0
@@ -411,8 +487,11 @@ def build_run_events(groups_seen, group_map, p, block_assignments=None, closing_
         nonlocal since_smix, since_blank
         if not n_next:
             return
-        if use_supermix and since_smix + n_next > smix_every:
-            events.append(("Supermix", None))
+        if std_on and since_smix + n_next > smix_every:
+            if k562_w_smix:
+                events.append(("K562", None))
+            if use_supermix:
+                events.append(("Supermix", None))
             events.append(("Blank", None))
             since_smix = since_blank = 0
         elif since_blank + n_next > block_size:
@@ -617,7 +696,8 @@ def _build_plate_queue(rows_for_plate, group_assignments, p,
     for kind, row in events:
         if kind == "Sample":
             roi      = row["ROI"].strip()
-            well_pos = sample_vial(row["Well_ID"], sample_slot, inst)
+            well_pos = sample_vial(row["Well_ID"], sample_slot, inst,
+                                   len(PLATE_FORMATS.get(str(p.get("plate_format", "96")), (ROWS, COLS))[1]))
             load     = row.get("_load") or sample_load
             sid      = "_".join(x for x in (prefix, load, roi) if x) + (f"_r{row['_rep']}" if row.get("_rep") else "")
             qrow     = make_row(well_pos, sid, sample_path, sep_method, inj_method, ms_method, proc_method)
@@ -767,18 +847,22 @@ def build_queue_core(csv_bytes: bytes, group_assignments: dict, p: dict,
         pr        = plate_results[pl]
         sslot     = pr["sample_slot"]
         rows_pl   = plate_rows[pl]
-        dropout_w = {r["Well_ID"].strip() for r in rows_pl
-                     if r.get("Dropout {Y/N}", "").strip().upper() == "Y"}
-        grid = {r: {c: "" for c in COLS} for r in ROWS}
+        p_rows, p_cols = PLATE_FORMATS.get(str(p.get("plate_format", "96")), (ROWS, COLS))
+        dropout_w = {normalize_well(r["Well_ID"]) for r in rows_pl
+                     if r["Well_ID"].strip() and r.get("Dropout {Y/N}", "").strip().upper() == "Y"}
+        grid = {r: {c: "" for c in p_cols} for r in p_rows}
         well_to_group = {}
         for row in rows_pl:
             w_id = row["Well_ID"].strip()
             if w_id:
-                roi = row["ROI"].strip()
+                w_id = normalize_well(w_id)
+                roi  = row["ROI"].strip()
                 grid[w_id[0]][int(w_id[1:])] = roi
                 well_to_group[roi] = group_assignments.get(roi, suggest_group(roi))
 
         groups_pl = pr["groups_seen"]
+        if groups_pl == ["All samples"]:
+            groups_pl = list(dict.fromkeys(well_to_group.values()))
         n_g       = max(len(groups_pl), 1)
         group_colors = {}
         for i, g in enumerate(groups_pl):
@@ -787,8 +871,8 @@ def build_queue_core(csv_bytes: bytes, group_assignments: dict, p: dict,
 
         color_map  = {}
         label_color = {}
-        for r in ROWS:
-            for c in COLS:
+        for r in p_rows:
+            for c in p_cols:
                 roi = grid[r][c]
                 if roi:
                     grp = well_to_group.get(roi, "")
@@ -801,12 +885,13 @@ def build_queue_core(csv_bytes: bytes, group_assignments: dict, p: dict,
 
         roi_to_group = {roi: well_to_group.get(roi, roi) for roi in color_map}
         png = plot_plate(grid, color_map, f"{sslot} - {pl} Samples ({stem})",
-                         legend_group_map=roi_to_group, label_color_map=label_color)
+                         legend_group_map=roi_to_group, label_color_map=label_color,
+                         rows=p_rows, cols=p_cols)
         buf = io.StringIO()
         wtr = csv.writer(buf)
-        wtr.writerow([""] + COLS)
-        for r in ROWS:
-            wtr.writerow([r] + [grid[r][c] for c in COLS])
+        wtr.writerow([""] + p_cols)
+        for r in p_rows:
+            wtr.writerow([r] + [grid[r][c] for c in p_cols])
         key = f"{sslot}_{pl}"
         sample_slot_outputs[key] = {
             "grid": grid, "png": png,
@@ -893,8 +978,26 @@ def build_zip(res: dict) -> bytes:
 # ============================================================
 # STREAMLIT TAB
 # ============================================================
-def render_ms_queue_tab():
-    st.header("MS Sample Queue")
+# Run mode presets, every value stays editable afterwards
+RUN_PRESETS = {
+    "Bulk": {"msq_rand_mode": "Off", "msq_block_size": GROUP_SIZE, "msq_smix_interval": SUPERMIX_INTERVAL,
+             "msq_k562_with_smix": False, "msq_plate_fmt": "96"},
+    "SCP":  {"msq_rand_mode": "Whole plate", "msq_block_size": 12, "msq_smix_interval": 24,
+             "msq_k562_with_smix": True, "msq_plate_fmt": "384"},
+}
+
+
+def _apply_run_preset():
+    for k, v in RUN_PRESETS[st.session_state.msq_run_mode].items():
+        st.session_state[k] = v
+
+
+def render_ms_queue_tab(standalone=False):
+    """standalone: msQ app, no Tab 3 pipe and no all steps zip."""
+    if not standalone:
+        st.header("MS Sample Queue")
+    for k, v in RUN_PRESETS["Bulk"].items():
+        st.session_state.setdefault(k, v)
 
     for key in ("msq_results", "msq_zip", "msq_last", "msq_group_assignments",
                 "msq_block_labels", "msq_csv_hash", "msq_overrides", "msq_last_key",
@@ -912,8 +1015,19 @@ def render_ms_queue_tab():
                  if instrument == INST_ZOOM else LC_EVOSEP
     inst = "ultra" if instrument == INST_ULTRA else ("zoom_neo" if lc_system == LC_NEO else "zoom_evo")
     is_zoom = inst != "ultra"
+    i3, i4 = st.columns(2)
+    i3.radio("Run mode", list(RUN_PRESETS), horizontal=True, key="msq_run_mode", on_change=_apply_run_preset,
+             help="Sets defaults below. SCP: whole plate randomized, blank every 12, K562 and Supermix "
+                  "every 24, 384 plates on the Ultra. Everything stays editable.")
+    if is_zoom:
+        plate_format = "96"
+        i4.caption("Plate format: 96 well (Evosep and Vanquish).")
+    else:
+        plate_format = i4.radio("Sample plate format", list(PLATE_FORMATS), horizontal=True, key="msq_plate_fmt",
+                                help="Controls plate is always 96 well.")
+    p_rows, p_cols = PLATE_FORMATS[plate_format]
     st.caption({
-        "ultra":    "Bruker HyStar queue (XLSX). Positions SlotN:1 to 96, controls one well per injection.",
+        "ultra":    "Bruker HyStar queue (XLSX). Positions SlotN:1 to 96 (384: 1 to 384), controls one well per injection.",
         "zoom_evo": "Xcalibur sequence (CSV). Evosep Slot1 to Slot6, positions SlotN:1 to 96 (A1=1, B1=13), "
                     "controls one tip per injection.",
         "zoom_neo": "Xcalibur sequence (CSV). Vanquish trays R, G, B, Y, positions A1 to H12, "
@@ -1069,8 +1183,21 @@ def render_ms_queue_tab():
     # 4. Sample list
     st.divider()
     st.subheader("4. Sample list")
-    pipe_csv  = st.session_state.get("t3_sample_list")
-    pipe_stem = st.session_state.get("t3_stem")
+    pipe_csv  = None if standalone else st.session_state.get("t3_sample_list")
+    pipe_stem = None if standalone else st.session_state.get("t3_stem")
+    st.markdown(
+        "- **Required**: a sample name column (`ROI`, `Sample`, `sample_name` or `Sample Name`) and a well "
+        f"column (`Well_ID` or `well`), wells A1 to {p_rows[-1]}{p_cols[-1]}, `A01` style is fine.\n"
+        "- **Optional**: `Group`, `Load`, `Inj Vol`, `Plate`, `Dropout {Y/N}`. Column names are not case sensitive.\n"
+        "- **CellenONE**: an export with `Location` and `Event Id` works too, the name becomes `Location_EventId`.\n"
+        + ("" if standalone else "- A list piped from Tab 3 is used automatically when nothing is uploaded.\n")
+    )
+    _tpl = find_templates()
+    if _tpl:
+        _tc = st.columns(min(len(_tpl), 4))
+        for i, (fn, data) in enumerate(_tpl.items()):
+            _tc[i % len(_tc)].download_button(f"Template: {fn}", data, file_name=fn, mime="text/csv",
+                                              key=f"msq_tpl_{fn}")
     uploaded  = st.file_uploader("Upload sample list CSV", type=["csv"], key="msq_upload")
 
     if uploaded:
@@ -1113,6 +1240,20 @@ def render_ms_queue_tab():
     if not samples:
         st.error("No active samples in CSV (all marked as dropouts).")
         return
+
+    bad_wells = []
+    for i, r in enumerate(all_rows):
+        w, why = check_well(r.get("Well_ID", ""), p_rows, p_cols)
+        if w is None:
+            bad_wells.append({"CSV row": i + 2, "Sample": r.get("ROI", ""), "Well": r.get("Well_ID", ""), "Problem": why})
+    if bad_wells:
+        st.error(f"{len(bad_wells)} row(s) have a well that is not valid for a {plate_format} well plate.")
+        st.dataframe(pd.DataFrame(bad_wells), hide_index=True, use_container_width=True)
+        return
+    _wells = [normalize_well(r["Well_ID"]) + "|" + r.get("Plate", "") for r in samples]
+    _dupes = sorted({w.split("|")[0] for w in _wells if _wells.count(w) > 1})
+    if _dupes:
+        st.warning("Wells used more than once: " + ", ".join(_dupes))
 
     # Detect plates from CSV
     has_plate_col = "Plate" in fields
@@ -1388,22 +1529,24 @@ def render_ms_queue_tab():
     # 8. Control intervals
     st.divider()
     st.subheader("8. Control intervals")
-    _ro1, _ro2, _ro3 = st.columns([1, 1, 1])
-    block_size = _ro1.number_input("Blank interval (samples)", min_value=1,
-                                   max_value=50, value=GROUP_SIZE, step=1,
+    _ro1, _ro2, _ro3, _ro4 = st.columns(4)
+    block_size = _ro1.number_input("Blank interval (samples)", min_value=1, max_value=96, step=1,
                                    key="msq_block_size",
                                    help="Max samples between Blank injections.")
-    smix_interval = _ro2.number_input("Supermix interval (samples)", min_value=1,
-                                      max_value=96, value=SUPERMIX_INTERVAL, step=1,
-                                      key="msq_smix_interval", disabled=not use_supermix,
-                                      help="Max samples between Supermix injections.")
-    run_len_min = _ro3.number_input("Run length (min)", min_value=1, max_value=240,
+    k562_with_smix = _ro3.checkbox("K562 with every Supermix", key="msq_k562_with_smix", disabled=not use_k562,
+                                   help="Inside a block K562 also runs at the standard interval, as in SCP. "
+                                        "Off: K562 only at block starts.")
+    _std_on = use_supermix or (k562_with_smix and use_k562)
+    smix_interval = _ro2.number_input("Standard interval (samples)", min_value=1, max_value=192, step=1,
+                                      key="msq_smix_interval", disabled=not _std_on,
+                                      help="Max samples between Supermix injections, plus K562 if ticked.")
+    run_len_min = _ro4.number_input("Run length (min)", min_value=1, max_value=240,
                                     value=22 if is_zoom else 40, step=1, key=f"msq_run_len_{'zoom' if is_zoom else 'ultra'}",
                                     help="Per injection, used for the runtime estimate.")
 
-    if use_supermix and int(smix_interval) < int(block_size):
-        st.warning("Supermix interval is below the Blank interval. Supermix can only be "
-                   "placed at a batch boundary, so its cap cannot be met.")
+    if _std_on and int(smix_interval) < int(block_size):
+        st.warning("Standard interval is below the Blank interval. Standards can only be "
+                   "placed at a batch boundary, so the interval cannot be met.")
 
     group_assignments = {row["ROI"]: row["Group"] for row in init_data}
     overrides         = st.session_state.msq_overrides or []
@@ -1416,6 +1559,7 @@ def render_ms_queue_tab():
         ms_method=ms_method, proc_method=proc_method,
         sample_path=sample_path, blank_path=blank_path, std_path=std_path,
         stem=stem, inst=inst, inj_vol=inj_vol, fixed_positions=fixed_positions,
+        plate_format=plate_format, k562_with_smix=bool(k562_with_smix),
         zoom_name=zoom_name, sample_table=sample_table,
         plate_slot_map=plate_slot_map,
         randomize_mode=randomize_mode,
@@ -1427,7 +1571,7 @@ def render_ms_queue_tab():
 
     # Rebuild only when something that changes the queue changed
     build_key = (
-        csv_hash, inst, tags, std_path, tuple(sorted(zoom_name.items())),
+        csv_hash, inst, tags, std_path, tuple(sorted(zoom_name.items())), plate_format, bool(k562_with_smix),
         tuple((t["Sample"], t["Load"], t["Inj Vol"]) for t in sample_table),
         tuple(sorted(inj_vol.items())), tuple(sorted(fixed_positions.items())),
         tuple(sorted(group_assignments.items())),
@@ -1609,13 +1753,14 @@ def render_ms_queue_tab():
         return buf.getvalue()
 
     dl_all, dl_ms = st.columns(2)
-    dl_all.download_button(
-        "Download all steps (zip)", build_all_zip(res, st.session_state.msq_zip),
-        file_name=f"{stem_out}_all_steps.zip", mime="application/zip", type="primary"
-    )
+    if not standalone:
+        dl_all.download_button(
+            "Download all steps (zip)", build_all_zip(res, st.session_state.msq_zip),
+            file_name=f"{stem_out}_all_steps.zip", mime="application/zip", type="primary"
+        )
     dl_ms.download_button(
-        "Download MS queue only (zip)", st.session_state.msq_zip,
-        file_name=f"{stem_out}_ms_queue.zip", mime="application/zip"
+        "Download MS queue (zip)" if standalone else "Download MS queue only (zip)", st.session_state.msq_zip,
+        file_name=f"{stem_out}_ms_queue.zip", mime="application/zip", type="primary" if standalone else "secondary"
     )
 
     st.divider()
